@@ -663,6 +663,42 @@ out="$(run "$H" __preview does-not-exist)"
 if [ -n "$out" ]; then ok "preview of an unknown alias does not crash"; else ok "preview of an unknown alias is empty"; fi
 
 # --------------------------------------------------------------------------
+section "ignore picker rows"
+
+H="$(newhome ignrows)"
+cat > "$H/.ssh/config" <<'EOF'
+# >>> sushi managed hosts >>>
+Host alpha
+    HostName a.example.com
+    User one
+Host beta gamma
+    HostName bg.example.com
+    User two
+# <<< sushi managed hosts <<<
+
+Host handwritten
+    HostName hand.example.com
+    User three
+EOF
+printf ': 1:0;ssh new@fresh.example.com\n' > "$H/.zsh_history"
+
+rows="$(run "$H" __ignoremenu)"
+assert_has "offers un-imported candidates"      "scan"     "$rows"
+assert_has "with the candidate as the payload"  "new@fresh.example.com" "$rows"
+assert_has "offers imported hosts"              "imported" "$rows"
+assert_has "showing what an alias resolves to"  "one@a.example.com" "$rows"
+assert_has "every managed pattern, not just the first" "gamma" "$rows"
+assert_lacks "and nothing hand-written"         "handwritten" "$rows"
+
+# the target lookup used to run config_hosts once per alias
+n="$(printf '%s\n' "$rows" | grep -c 'imported')"
+assert_eq "one row per managed pattern" "3" "$n"
+
+# each row's last field is the payload the picker acts on: a pattern or an alias
+last="$(printf '%s\n' "$rows" | grep 'imported' | grep 'alpha' | awk '{ print $NF }')"
+assert_eq "the imported payload is the bare alias" "alpha" "$last"
+
+# --------------------------------------------------------------------------
 section "theme"
 
 H="$(newhome theme)"

@@ -99,8 +99,11 @@ flatten_config() {
   [ -r "$file" ] || return 0
   [ "$depth" -gt 8 ] && return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$(printf '%s' "$line" | tr 'A-Z' 'a-z')" in
-      *include*)
+    # A builtin glob, not `printf | tr`: this runs for every line of every config
+    # file, and two forks a line made config_hosts cost ~500ms on a 170-line
+    # config — paid again by every preview redraw and every caller.
+    case "$line" in
+      *[Ii][Nn][Cc][Ll][Uu][Dd][Ee]*)
         if [[ "$line" =~ ^[[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]+(.*)$ ]]; then
           for tok in ${BASH_REMATCH[1]}; do
             tok="${tok%\"}"; tok="${tok#\"}"
@@ -247,10 +250,18 @@ history_files() {
 
 # Records: count|user|host|port   (most-used first)
 scan_history() {
-  local file line
-  while IFS= read -r file; do
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in *ssh*) ;; *) continue ;; esac
+  local line
+  local -a files=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && files+=("$line")
+  done < <(history_files)
+  [ "${#files[@]}" -gt 0 ] || return 0
+
+  # grep first, so the bash loop below only ever sees candidate lines. It is
+  # pure-builtin but still ~90us a line, and most of a shell history is not ssh
+  # — on a 20k-line history that is the difference between ~2s and ~100ms.
+  grep -hF ssh -- "${files[@]}" 2>/dev/null \
+    | while IFS= read -r line || [ -n "$line" ]; do
       # zsh EXTENDED_HISTORY:  ": 1699999999:0;cmd"
       case "$line" in ':'*';'*) line="${line#*;}" ;; esac
       # fish:  "- cmd: ssh ..."
@@ -258,8 +269,7 @@ scan_history() {
       # take the last segment of pipes/&&/; so `foo && ssh bar` still counts
       line="${line##*&& }"; line="${line##*; }"; line="${line##*| }"
       extract_dest "$line" 2>/dev/null
-    done < "$file"
-  done < <(history_files) \
+    done \
     | sort | uniq -c | sed 's/^ *//; s/ /|/' \
     | awk -F'[|]' '
         # Fold "same user@host, port unknown" rows into the port we did observe,
@@ -738,6 +748,46 @@ $name"
   rm -f "$additions"
 }
 
+# The ignore picker's rows: scan candidates you have not imported, plus the
+# hosts sushi has already written into ~/.ssh/config.
+#
+#   <kind>  <what you see>  <payload>
+#
+# The imported half used to call config_hosts once per managed alias, and
+# config_hosts is not cheap — 40 imported hosts meant 40 full config parses and a
+# 19-second wait before the menu appeared. One awk over two streams now, the same
+# marker trick scan_candidates uses (a multi-line -v would break on macOS awk).
+ignore_rows() {
+  local line count user host port target
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    IFS="$SEP" read -r count user host port <<< "$line"
+    target="${user:+$user@}$host"
+    printf '%s%-9s%s %s%-42s%s %s\n' \
+      "$C_CYAN" 'scan' "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$target"
+  done < <(scan_candidates)
+
+  {
+    config_hosts
+    printf '%s\n' '@@SUSHI_ALIASES@@'
+    managed_block | awk '{ l = $0; sub(/^[ \t]+/, "", l)
+      if (tolower(l) ~ /^host[ \t]/) { for (i = 2; i <= NF; i++) print $i } }'
+  } | awk -v pink="$C_PINK" -v rice="$C_RICE" -v off="$C_OFF" '
+      BEGIN { FS = "\t"; mode = 0 }
+      $0 == "@@SUSHI_ALIASES@@" { mode = 1; next }
+      mode == 0 {
+        if ($1 != "") tgt[$1] = ($3 != "" ? $3 "@" : "") $2
+        next
+      }
+      mode == 1 {
+        if ($0 == "") next
+        printf "%s%-9s%s %s%-42s%s %s\n", \
+          pink, "imported", off, rice, $0 "  (" tgt[$0] ")", off, $0
+      }
+    '
+}
+
 # sushi ignore / sushi delete
 #
 #   sushi ignore                 pick things to stop seeing (and drop imported ones)
@@ -804,39 +854,17 @@ EOF
   esac
 
   # ---- interactive: offer scan candidates AND hosts already in the config
-  local -a rows=()
-  local line count user host port target
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    IFS="$SEP" read -r count user host port <<< "$line"
-    target="${user:+$user@}$host"
-    rows+=("$(printf '%s%-9s%s %s%-42s%s %s' \
-      "$C_CYAN" 'scan' "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$target")")
-  done < <(scan_candidates)
+  local rows
+  rows="$(ignore_rows)"
 
-  local managed
-  managed="$(managed_block | awk '{ l = $0; sub(/^[ \t]+/, "", l)
-    if (tolower(l) ~ /^host[ \t]/) { for (i = 2; i <= NF; i++) print $i } }')"
-
-  local alias_ tgt
-  while IFS= read -r alias_; do
-    [ -n "$alias_" ] || continue
-    tgt="$(config_hosts | awk -F'\t' -v a="$alias_" \
-      '$1 == a { printf "%s%s", ($3 != "" ? $3 "@" : ""), $2 }')"
-    rows+=("$(printf '%s%-9s%s %s%-42s%s %s' \
-      "$C_PINK" 'imported' "$C_OFF" "$C_RICE" "$alias_  ($tgt)" "$C_OFF" "$alias_")")
-  done <<EOF
-$managed
-EOF
-
-  if [ "${#rows[@]}" -eq 0 ]; then
+  if [ -z "$rows" ]; then
     printf 'Nothing to ignore: no scan candidates and no sushi-managed hosts.\n'
     return 0
   fi
 
   local sel
   if have fzf && [ -t 0 ]; then
-    sel="$(printf '%s\n' "${rows[@]}" | sort -u | FZF --ansi --multi --height=80% --reverse --border \
+    sel="$(printf '%s\n' "$rows" | sort -u | FZF --ansi --multi --height=80% --reverse --border \
       --prompt='ignore ❯ ' \
       --header=$'TAB select · ENTER confirm · ESC cancel\nscan = never offer again · imported = also delete its Host stanza' \
       --bind 'ctrl-a:select-all')"
@@ -1001,6 +1029,7 @@ $a"; done
   __lines)           picker_lines ;;             # internal: what fzf is fed
   __subcommands)     printf '%s\n' "$SUBCOMMANDS" | tr ' ' '\n' ;;
   __scanmenu)        scan_menu ;;                # internal: scan picker's fzf input
+  __ignoremenu)      ignore_rows ;;             # internal: ignore picker's fzf input
   __menucache)       menu_from_cache ;;          # internal: reload from the cache
   __pend)            shift; pend_add "$@" ;;     # internal: note a ctrl-x dismissal
   __candidates)      scan_history ;;             # internal: raw history scan

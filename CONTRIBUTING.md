@@ -51,6 +51,33 @@ body and handles backup, blank-line collapsing, validation and permissions. `ins
 and `remove_managed_aliases` (delete) are thin wrappers over it. Add a third operation the same way
 rather than writing to `$CONFIG` directly.
 
+**Watch out for per-line and per-item forks.** Every performance problem this project has had was
+the same shape: a subprocess inside a loop.
+
+- `flatten_config` ran `printf | tr` on every line of the ssh config to lowercase it for one glob
+  test. Two forks a line made `config_hosts` cost ~500ms on a 170-line config — and `config_hosts`
+  is called by nearly everything, including every preview redraw. A `case` with `[Ii][Nn]...`
+  bracket globs does the same job with no fork.
+- `cmd_ignore` called `config_hosts` once per managed alias to resolve its target. Forty imported
+  hosts meant forty full config parses: **19 seconds** before the menu appeared. It is one awk over
+  two marker-separated streams now.
+- `scan_history` looped in bash over every line of every history file. Pure builtins, but still
+  ~90us a line. A `grep -hF ssh` in front means the loop only sees candidate lines.
+
+The pattern to reach for when you need two datasets in one awk: concatenate the streams with a
+marker line between them and switch on it in the program. Passing one of them through `awk -v`
+instead breaks on macOS as soon as it contains a newline (see above).
+
+Benchmark with the internal subcommands before and after:
+
+```bash
+time ./sushi __candidates    # history parse
+time ./sushi __lines         # main picker rows
+time ./sushi __preview host  # one preview redraw
+time ./sushi __scanmenu      # scan picker rows
+time ./sushi __ignoremenu    # ignore picker rows
+```
+
 **Keep the scan picker's redraw cheap.** `ctrl-x` fires a reload on every keypress, so anything on
 that path runs tens of times a second in practice. It reads a pre-built cache (`SUSHI_SCAN_CACHE`)
 and a pending-dismissals file (`SUSHI_SCAN_PENDING`); it must not touch the history, the ssh config
@@ -87,6 +114,9 @@ sushi __candidates       # raw history scan:  count|user|host|port
 sushi __lines            # exactly what is piped into fzf
 sushi __preview foo      # the preview pane for one alias
 sushi __rmalias foo bar  # delete managed stanzas without the picker
+sushi __scanmenu         # scan picker rows
+sushi __ignoremenu       # ignore picker rows
+sushi __subcommands      # what the zsh wrapper passes through
 ```
 
 Point them at a fixture rather than your real history:
