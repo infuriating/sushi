@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# sshui test suite. No fzf and no terminal required.
+# sushi test suite. No fzf and no terminal required.
 #
 #   test/run.sh              run everything
 #   test/run.sh -v           show every assertion, not just failures
@@ -8,12 +8,12 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SSHUI="$ROOT/sshui"
+SUSHI="$ROOT/sushi"
 VERBOSE=0
 [ "${1:-}" = "-v" ] && VERBOSE=1
 
 PASS=0; FAIL=0; SKIP=0
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/sshui-test.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/sushi-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 red()   { printf '\033[31m%s\033[0m' "$1"; }
@@ -61,37 +61,37 @@ newhome() {
 # count backup files without piping ls through grep
 count_backups() {
   local f n=0
-  for f in "$1"/config.sshui-backup-*; do
+  for f in "$1"/config.sushi-backup-*; do
     [ -e "$f" ] && n=$((n + 1))
   done
   printf '%s' "$n"
 }
 
-# run sshui with a given fake home
+# run sushi with a given fake home
 run() {
   local h="$1"; shift
-  HOME="$h" "$SSHUI" "$@" 2>&1
+  HOME="$h" "$SUSHI" "$@" 2>&1
 }
 
-# import everything sshui finds, non-interactively
+# import everything sushi finds, non-interactively
 import_all() {
   local h="$1"
-  printf 'w\n' | HOME="$h" SSHUI_ALL=1 "$SSHUI" scan 2>&1
+  printf 'w\n' | HOME="$h" SUSHI_ALL=1 "$SUSHI" scan 2>&1
 }
 
 # --------------------------------------------------------------------------
 section "static checks"
 
-if bash -n "$SSHUI" 2>/dev/null; then ok "sshui parses under bash"; else no "sshui parses under bash"; fi
+if bash -n "$SUSHI" 2>/dev/null; then ok "sushi parses under bash"; else no "sushi parses under bash"; fi
 
 if command -v zsh >/dev/null 2>&1; then
-  if zsh -n "$ROOT/sshui.zsh" 2>/dev/null; then ok "sshui.zsh parses under zsh"; else no "sshui.zsh parses under zsh"; fi
+  if zsh -n "$ROOT/sushi.zsh" 2>/dev/null; then ok "sushi.zsh parses under zsh"; else no "sushi.zsh parses under zsh"; fi
 else
-  skip "sshui.zsh parses under zsh" "zsh not installed"
+  skip "sushi.zsh parses under zsh" "zsh not installed"
 fi
 
 if command -v shellcheck >/dev/null 2>&1; then
-  out="$(shellcheck -S warning "$SSHUI" 2>&1)"
+  out="$(shellcheck -S warning "$SUSHI" 2>&1)"
   assert_eq "shellcheck clean at warning level" "" "$out"
 else
   skip "shellcheck" "not installed"
@@ -205,7 +205,7 @@ section "history parsing: globbing safety"
 H="$(newhome glob)"
 touch "$H/aaa.log" "$H/bbb.log"
 printf ': 1:0;ssh globber@globs.example.com *.log\n' > "$H/.zsh_history"
-cand="$(cd "$H" && HOME="$H" "$SSHUI" __candidates 2>&1)"
+cand="$(cd "$H" && HOME="$H" "$SUSHI" __candidates 2>&1)"
 assert_has   "an unquoted glob in history does not expand" "1|globber|globs.example.com|" "$cand"
 assert_lacks "no filenames leak in from the cwd"           "aaa.log"                      "$cand"
 
@@ -254,7 +254,7 @@ assert_has "keeps hand-written stanzas"       "Host mine-by-hand"          "$cfg
 assert_has "keeps the Host * block"           "ServerAliveInterval 60"     "$cfg"
 
 # the managed block must come first, or a leading `Host *` would win in ssh_config
-first_marker="$(grep -n 'sshui managed hosts' "$H/.ssh/config" | head -1 | cut -d: -f1)"
+first_marker="$(grep -n 'sushi managed hosts' "$H/.ssh/config" | head -1 | cut -d: -f1)"
 first_host="$(grep -n '^Host ' "$H/.ssh/config" | head -1 | cut -d: -f1)"
 if [ -n "$first_marker" ] && [ "$first_marker" -lt "$first_host" ]; then
   ok "managed block is above every pre-existing Host"
@@ -354,7 +354,7 @@ if command -v ssh >/dev/null 2>&1; then
   printf '#!/bin/sh\nprintf "Host oops\\n    NotARealSshOption yes\\n" >> "$1"\n' > "$ed"
   chmod +x "$ed"
 
-  out="$(printf 'e\n' | HOME="$H" SSHUI_ALL=1 EDITOR="$ed" "$SSHUI" scan 2>&1)"
+  out="$(printf 'e\n' | HOME="$H" SUSHI_ALL=1 EDITOR="$ed" "$SUSHI" scan 2>&1)"
   after="$(cat "$H/.ssh/config")"
 
   assert_has "reports the validation failure" "NOT changed" "$out"
@@ -388,7 +388,7 @@ assert_lacks "a host glob hides a whole domain"       "staging.acme"   "$out"
 assert_has   "unrelated candidates are untouched"     "keep.example.com" "$out"
 assert_has   "it says how many it hid"                "hidden by"      "$out"
 
-perm="$(ls -l "$H/.ssh/sshui-ignore" | cut -c1-10)"
+perm="$(ls -l "$H/.ssh/sushi-ignore" | cut -c1-10)"
 assert_eq "the ignore file is mode 600" "-rw-------" "$perm"
 
 out="$(run "$H" ignore --list)"
@@ -405,11 +405,11 @@ assert_lacks "and leaves the other entry alone"  "staging.acme" "$out"
 # comments and blank lines must not match anything
 H="$(newhome ign2)"
 printf ': 1:0;ssh a@only.example.com\n' > "$H/.zsh_history"
-printf '# a comment\n\n   \n# root@*\n' > "$H/.ssh/sshui-ignore"
+printf '# a comment\n\n   \n# root@*\n' > "$H/.ssh/sushi-ignore"
 out="$(run "$H" scan -n)"
 assert_has "comments and blank lines are not patterns" "only.example.com" "$out"
 
-printf 'a@only.example.com   # trailing comment\n' >> "$H/.ssh/sshui-ignore"
+printf 'a@only.example.com   # trailing comment\n' >> "$H/.ssh/sushi-ignore"
 out="$(run "$H" scan -n)"
 assert_lacks "an entry with a trailing comment still matches" "only.example.com" "$out"
 
@@ -439,7 +439,7 @@ assert_eq  "column 3 is the ignore pattern" "junk@decommissioned.example.com" "$
 row="$(printf '%s\n' "$menu" | grep kh.example.com)"
 assert_eq "a username-less row yields a bare-host pattern" "kh.example.com" "$(printf '%s' "$row" | cut -f3)"
 
-# what ctrl-x actually runs: `sshui ignore <column 3>`, then reload
+# what ctrl-x actually runs: `sushi ignore <column 3>`, then reload
 pat="$(printf '%s\n' "$menu" | grep decommissioned | cut -f3)"
 run "$H" ignore "$pat" >/dev/null
 menu2="$(run "$H" __scanmenu)"
@@ -486,14 +486,14 @@ assert_has "will not delete a stanza outside the managed block" "handwritten" "$
 # a Host line with several patterns loses only the named one
 H="$(newhome del2)"
 cat > "$H/.ssh/config" <<'EOF'
-# >>> sshui managed hosts >>>
+# >>> sushi managed hosts >>>
 Host alpha beta
     HostName ab.example.com
     User x
 
 Host gamma
     HostName g.example.com
-# <<< sshui managed hosts <<<
+# <<< sushi managed hosts <<<
 EOF
 run "$H" __rmalias alpha >/dev/null
 out="$(run "$H" list)"
@@ -550,9 +550,9 @@ section "empty state"
 
 H="$(newhome empty)"
 out="$(run "$H" list)"
-assert_has "list explains what to do next" "run: sshui scan" "$out"
+assert_has "list explains what to do next" "run: sushi scan" "$out"
 out="$(run "$H" help)"
-assert_has "help lists the scan command" "sshui scan" "$out"
+assert_has "help lists the scan command" "sushi scan" "$out"
 
 # --------------------------------------------------------------------------
 section "zsh integration"
@@ -560,20 +560,20 @@ section "zsh integration"
 if command -v zsh >/dev/null 2>&1; then
   H="$(newhome zsh)"
   printf 'Host zhost\n    HostName z.example.com\n' > "$H/.ssh/config"
-  Z="$ROOT/sshui.zsh"
+  Z="$ROOT/sushi.zsh"
 
   # zprobe <mode> <zsh snippet> -> last line of output
   zprobe() {
-    HOME="$H" zsh -ic "SSHUI_MODE='$1'; source '$Z'; $2" 2>&1 | tail -1
+    HOME="$H" zsh -ic "SUSHI_MODE='$1'; source '$Z'; $2" 2>&1 | tail -1
   }
 
-  assert_eq "engine is found next to sshui.zsh"  "$SSHUI" "$(zprobe key 'echo $SSHUI_BIN')"
-  assert_has "sshui works as a shell function, off PATH" "zhost" "$(zprobe key 'sshui list')"
+  assert_eq "engine is found next to sushi.zsh"  "$SUSHI" "$(zprobe key 'echo $SUSHI_BIN')"
+  assert_has "sushi works as a shell function, off PATH" "zhost" "$(zprobe key 'sushi list')"
 
-  out="$(HOME="$H" zsh -ic "source '$Z'; echo \$SSHUI_MODE" 2>&1 | tail -1)"
+  out="$(HOME="$H" zsh -ic "source '$Z'; echo \$SUSHI_MODE" 2>&1 | tail -1)"
   assert_eq "default mode does not shadow ssh" "key,enter" "$out"
 
-  out="$(HOME="$H" zsh -c "SSHUI_MODE=wrap; source '$Z'; whence -w ssh" 2>&1 | tail -1)"
+  out="$(HOME="$H" zsh -c "SUSHI_MODE=wrap; source '$Z'; whence -w ssh" 2>&1 | tail -1)"
   assert_eq "non-interactive zsh never loads the integration" "ssh: command" "$out"
 
   section "zsh integration: handing the host back to the shell"
@@ -587,42 +587,59 @@ if command -v zsh >/dev/null 2>&1; then
   printf '#!/bin/sh\necho "STUBSSH $*"\n' > "$STUB/ssh"
   chmod +x "$STUB/ssh"
 
-  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sshui_dispatch myhost" 2>&1)"
+  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sushi_dispatch myhost" 2>&1)"
   assert_lacks "by default the function does not connect itself" "STUBSSH" "$out"
 
-  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "SSHUI_EXEC=1; source '$Z'; _sshui_dispatch myhost" 2>&1)"
-  assert_has "SSHUI_EXEC=1 connects immediately instead" "STUBSSH myhost" "$out"
+  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "SUSHI_EXEC=1; source '$Z'; _sushi_dispatch myhost" 2>&1)"
+  assert_has "SUSHI_EXEC=1 connects immediately instead" "STUBSSH myhost" "$out"
 
-  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sshui_dispatch ''" 2>&1)"
+  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sushi_dispatch ''" 2>&1)"
   assert_lacks "an empty pick is a no-op" "STUBSSH" "$out"
 
-  assert_eq "SSHUI_EXEC defaults to off" "0" "$(zprobe key 'print $SSHUI_EXEC')"
+  assert_eq "SUSHI_EXEC defaults to off" "0" "$(zprobe key 'print $SUSHI_EXEC')"
 
-  # subcommands must still reach the engine untouched
-  assert_has "sshui list reaches the engine"  "zhost"       "$(zprobe key 'sshui list')"
-  assert_has "sshui help reaches the engine"  "fuzzy SSH"   "$(zprobe key 'sshui help 2>&1 | head -1')"
-  assert_has "sshui scan -n reaches the engine" "Nothing new found" \
-             "$(zprobe key 'sshui scan -n 2>&1 | tail -1')"
-  assert_has "the dispatcher exists even in off mode" "0" "$(zprobe off 'print $SSHUI_EXEC')"
+  # EVERY subcommand the engine advertises must reach it through the wrapper
+  # rather than being mistaken for a picker query. A hardcoded list in the
+  # wrapper went stale when `ignore` was added; this walks the real list.
+  for sub in $("$SUSHI" __subcommands); do
+    case "$sub" in
+      choose|edit) continue ;;   # choose blocks on fzf; edit spawns $EDITOR
+    esac
+    out="$(zprobe key "sushi $sub --help 2>&1 | head -2")"
+    assert_lacks "sushi $sub is not treated as a picker query" "no hosts in" "$out"
+  done
+
+  assert_has "sushi list reaches the engine"  "zhost"       "$(zprobe key 'sushi list')"
+  assert_has "sushi help reaches the engine"  "fuzzy SSH"   "$(zprobe key 'sushi help 2>&1 | head -1')"
+  assert_has "sushi scan -n reaches the engine" "Nothing new found" \
+             "$(zprobe key 'sushi scan -n 2>&1 | tail -1')"
+  assert_has "sushi ignore --list reaches the engine" "Nothing ignored yet" \
+             "$(zprobe key 'sushi ignore --list 2>&1 | head -1')"
+  # a bare unknown word must go to the picker, not be taken for a subcommand
+  # (empty config, so the picker bails before it would reach for fzf)
+  out="$(HOME="$H" zsh -ic "SUSHI_MODE=key; export SUSHI_CONFIG=$WORK/none.conf; source '$Z'
+    sushi somethingunmatched 2>&1 | head -1" 2>&1 | tail -1)"
+  assert_has "a bare unknown word is still a picker query" "no hosts in" "$out"
+  assert_has "the dispatcher exists even in off mode" "0" "$(zprobe off 'print $SUSHI_EXEC')"
 
   section "zsh integration: mode key"
   assert_eq "leaves ssh a real command"  "ssh: command"       "$(zprobe key 'whence -w ssh')"
-  assert_has "binds the key"             "sshui-insert-host"  "$(zprobe key "bindkey '^S'")"
-  assert_lacks "does not touch accept-line" "sshui-accept-line" "$(zprobe key 'zle -l | grep accept-line')"
-  out="$(HOME="$H" zsh -ic "SSHUI_MODE=key; SSHUI_KEY='^G'; source '$Z'; bindkey '^G'" 2>&1 | tail -1)"
-  assert_has "honours a custom SSHUI_KEY" "sshui-insert-host" "$out"
+  assert_has "binds the key"             "sushi-insert-host"  "$(zprobe key "bindkey '^S'")"
+  assert_lacks "does not touch accept-line" "sushi-accept-line" "$(zprobe key 'zle -l | grep accept-line')"
+  out="$(HOME="$H" zsh -ic "SUSHI_MODE=key; SUSHI_KEY='^G'; source '$Z'; bindkey '^G'" 2>&1 | tail -1)"
+  assert_has "honours a custom SUSHI_KEY" "sushi-insert-host" "$out"
 
   section "zsh integration: mode enter"
   assert_eq "leaves ssh a real command"  "ssh: command"  "$(zprobe enter 'whence -w ssh')"
-  assert_has "binds the RETURN key"      "sshui-accept-line" "$(zprobe enter "bindkey '^M'")"
-  assert_lacks "does not bind ^S"        "sshui-insert-host" "$(zprobe enter "bindkey '^S'")"
-  out="$(HOME="$H" zsh -ic "SSHUI_MODE=enter; SSHUI_RETURN='^J'; source '$Z'; bindkey '^J'" 2>&1 | tail -1)"
-  assert_has "honours a custom SSHUI_RETURN" "sshui-accept-line" "$out"
+  assert_has "binds the RETURN key"      "sushi-accept-line" "$(zprobe enter "bindkey '^M'")"
+  assert_lacks "does not bind ^S"        "sushi-insert-host" "$(zprobe enter "bindkey '^S'")"
+  out="$(HOME="$H" zsh -ic "SUSHI_MODE=enter; SUSHI_RETURN='^J'; source '$Z'; bindkey '^J'" 2>&1 | tail -1)"
+  assert_has "honours a custom SUSHI_RETURN" "sushi-accept-line" "$out"
 
   # It must NOT take ownership of the accept-line widget: zsh-autosuggestions,
   # zsh-syntax-highlighting and terminal integrations all wrap it, `zle -N
   # accept-line` destroys whoever held it, and the loser depends on load order.
-  assert_lacks "never takes over the accept-line widget" "sshui" \
+  assert_lacks "never takes over the accept-line widget" "sushi" \
                "$(zprobe enter 'print -r -- $widgets[accept-line]')"
 
   section "zsh integration: coexistence with widget-wrapping plugins"
@@ -644,38 +661,38 @@ zle -N accept-line _fakesuggest_bound_accept-line
 PLUGIN
 
   for ord in "'$Z' '$FAKE'" "'$FAKE' '$Z'"; do
-    label="$([ "${ord#\'$Z\'}" != "$ord" ] && echo "sshui first" || echo "plugin first")"
-    out="$(HOME="$H" zsh -ic "SSHUI_MODE=enter; source ${ord% *}; source ${ord#* }
+    label="$([ "${ord#\'$Z\'}" != "$ord" ] && echo "sushi first" || echo "plugin first")"
+    out="$(HOME="$H" zsh -ic "SUSHI_MODE=enter; source ${ord% *}; source ${ord#* }
       print -r -- \"W=\$widgets[accept-line] K=\$(bindkey '^M')\"" 2>&1 | tail -1)"
     assert_has "$label: the plugin keeps accept-line" "_fakesuggest_bound_accept-line" "$out"
-    assert_has "$label: sshui still owns RETURN"      "sshui-accept-line"              "$out"
+    assert_has "$label: sushi still owns RETURN"      "sushi-accept-line"              "$out"
   done
 
   # Re-sourcing must be a no-op. `source ~/.zshrc` to reload is the documented
   # advice for terminals where `exec zsh` throws away their shell integration,
   # so sourcing twice — with a widget-wrapping plugin in between — has to be safe.
-  out="$(HOME="$H" zsh -ic "SSHUI_MODE=key,enter
+  out="$(HOME="$H" zsh -ic "SUSHI_MODE=key,enter
     source '$Z'; source '$FAKE'; source '$Z'; source '$Z'
     print -r -- \"W=\$widgets[accept-line] M=\$(bindkey '^M') S=\$(bindkey '^S')\"" 2>&1 | tail -1)"
   assert_has   "re-sourcing leaves accept-line with the plugin" "_fakesuggest_bound_accept-line" "$out"
-  assert_has   "re-sourcing keeps RETURN bound once"            "sshui-accept-line" "$out"
-  assert_has   "re-sourcing keeps ^S bound"                     "sshui-insert-host" "$out"
-  assert_lacks "re-sourcing does not chain sshui onto itself"   "sshui-accept-line sshui" "$out"
+  assert_has   "re-sourcing keeps RETURN bound once"            "sushi-accept-line" "$out"
+  assert_has   "re-sourcing keeps ^S bound"                     "sushi-insert-host" "$out"
+  assert_lacks "re-sourcing does not chain sushi onto itself"   "sushi-accept-line sushi" "$out"
 
   section "zsh integration: mode wrap"
   assert_eq "shadows ssh with a function" "ssh: function" "$(zprobe wrap 'whence -w ssh')"
   assert_has "ssh with arguments still reaches the real binary" "OpenSSH" "$(zprobe wrap 'ssh -V')"
-  assert_lacks "does not bind a key"      "sshui-insert-host" "$(zprobe wrap "bindkey '^S'")"
+  assert_lacks "does not bind a key"      "sushi-insert-host" "$(zprobe wrap "bindkey '^S'")"
 
   section "zsh integration: mode off / invalid"
   assert_eq "off leaves ssh alone"        "ssh: command"      "$(zprobe off 'whence -w ssh')"
-  assert_lacks "off binds nothing"        "sshui-insert-host" "$(zprobe off "bindkey '^S'")"
-  assert_has "off still provides the sshui function" "zhost"  "$(zprobe off 'sshui list')"
+  assert_lacks "off binds nothing"        "sushi-insert-host" "$(zprobe off "bindkey '^S'")"
+  assert_has "off still provides the sushi function" "zhost"  "$(zprobe off 'sushi list')"
   assert_has "an unrecognised mode warns" "matched nothing"   "$(zprobe bogus 'true')"
 
   section "zsh integration: combined modes"
-  assert_has "key,enter binds ^S"           "sshui-insert-host" "$(zprobe key,enter "bindkey '^S'")"
-  assert_has "key,enter binds RETURN"       "sshui-accept-line" "$(zprobe key,enter "bindkey '^M'")"
+  assert_has "key,enter binds ^S"           "sushi-insert-host" "$(zprobe key,enter "bindkey '^S'")"
+  assert_has "key,enter binds RETURN"       "sushi-accept-line" "$(zprobe key,enter "bindkey '^M'")"
   assert_eq  "key,enter leaves ssh a real command" "ssh: command" "$(zprobe key,enter 'whence -w ssh')"
 else
   skip "zsh integration" "zsh not installed"
@@ -691,30 +708,30 @@ printf '# pre-existing\nexport KEEP=1\n' > "$IH/.zshrc"
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
 zshrc="$(cat "$IH/.zshrc")"
 assert_has "keeps pre-existing .zshrc content" "export KEEP=1" "$zshrc"
-assert_has "writes the mode explicitly"        "SSHUI_MODE:=key,enter" "$zshrc"
-assert_has "sources the integration"           "sshui.zsh" "$zshrc"
+assert_has "writes the mode explicitly"        "SUSHI_MODE:=key,enter" "$zshrc"
+assert_has "sources the integration"           "sushi.zsh" "$zshrc"
 
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
-n="$(grep -c 'sshui.zsh' "$IH/.zshrc")"
+n="$(grep -c 'sushi.zsh' "$IH/.zshrc")"
 assert_eq "re-running does not duplicate the block" "1" "$n"
 
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --mode=wrap >/dev/null 2>&1
-assert_has "switching mode rewrites the block" "SSHUI_MODE:=wrap" "$(cat "$IH/.zshrc")"
-n="$(grep -c 'sshui.zsh' "$IH/.zshrc")"
+assert_has "switching mode rewrites the block" "SUSHI_MODE:=wrap" "$(cat "$IH/.zshrc")"
+n="$(grep -c 'sushi.zsh' "$IH/.zshrc")"
 assert_eq "switching mode leaves one block" "1" "$n"
 
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --key='^G' >/dev/null 2>&1
-assert_has "honours --key" "SSHUI_KEY:='^G'" "$(cat "$IH/.zshrc")"
+assert_has "honours --key" "SUSHI_KEY:='^G'" "$(cat "$IH/.zshrc")"
 
 # the written block must not clobber an exported value, so that
-# `SSHUI_MODE=off zsh -i` gives you a throwaway shell with sshui disabled
+# `SUSHI_MODE=off zsh -i` gives you a throwaway shell with sushi disabled
 if command -v zsh >/dev/null 2>&1; then
   HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --mode=enter >/dev/null 2>&1
-  out="$(HOME="$IH" zsh -ic 'print $SSHUI_MODE' 2>/dev/null | tail -1)"
+  out="$(HOME="$IH" zsh -ic 'print $SUSHI_MODE' 2>/dev/null | tail -1)"
   assert_eq "the .zshrc block applies its mode"  "enter" "$out"
-  out="$(HOME="$IH" SSHUI_MODE=off zsh -ic 'print $SSHUI_MODE' 2>/dev/null | tail -1)"
-  assert_eq "an exported SSHUI_MODE overrides it" "off" "$out"
-  out="$(HOME="$IH" SSHUI_MODE=wrap zsh -ic 'whence -w ssh' 2>/dev/null | tail -1)"
+  out="$(HOME="$IH" SUSHI_MODE=off zsh -ic 'print $SUSHI_MODE' 2>/dev/null | tail -1)"
+  assert_eq "an exported SUSHI_MODE overrides it" "off" "$out"
+  out="$(HOME="$IH" SUSHI_MODE=wrap zsh -ic 'whence -w ssh' 2>/dev/null | tail -1)"
   assert_eq "and the override actually takes effect" "ssh: function" "$out"
 fi
 
@@ -732,7 +749,67 @@ assert_lacks "stays quiet about Warp in enter mode" "shadows the ssh" "$out"
 HOME="$IH" "$ROOT/install.sh" --uninstall >/dev/null 2>&1
 zshrc="$(cat "$IH/.zshrc")"
 assert_has   "uninstall keeps your content" "export KEEP=1" "$zshrc"
-assert_lacks "uninstall removes everything sshui added" "sshui" "$zshrc"
+assert_lacks "uninstall removes everything sushi added" "sushi" "$zshrc"
+
+# --------------------------------------------------------------------------
+section "install.sh: migrating from the old sshui name"
+
+MH="$WORK/migrate"
+rm -rf "$MH"; mkdir -p "$MH/.ssh"
+cat > "$MH/.ssh/config" <<'EOF'
+# >>> sshui managed hosts >>>
+# Managed by sshui. Hand-edits are kept; delete a stanza to drop it.
+
+Host legacy
+    HostName legacy.example.com
+    User luca
+# <<< sshui managed hosts <<<
+
+Host handwritten
+    HostName hand.example.com
+EOF
+printf 'root@*\n' > "$MH/.ssh/sshui-ignore"
+printf '# mine\nexport KEEP=1\n# >>> sshui >>>\nsource "/old/path/sshui.zsh"\n# <<< sshui <<<\n' \
+  > "$MH/.zshrc"
+
+HOME="$MH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
+cfg="$(cat "$MH/.ssh/config")"
+zshrc="$(cat "$MH/.zshrc")"
+
+assert_has   "rewrites the managed-block markers"      "# >>> sushi managed hosts >>>" "$cfg"
+assert_lacks "no old markers survive"                  ">>> sshui managed"             "$cfg"
+assert_has   "the previously imported host is adopted" "Host legacy"                   "$cfg"
+assert_has   "hand-written stanzas survive migration"  "Host handwritten"              "$cfg"
+assert_has   "backs the config up before rewriting"    "legacy.example.com" \
+             "$(cat "$MH/.ssh/config.pre-sushi-rename")"
+
+# adopting the markers is what stops a second block appearing
+n="$(printf '%s\n' "$cfg" | grep -c 'managed hosts >>>')"
+assert_eq "exactly one managed block" "1" "$n"
+
+assert_has   "carries the ignore list over" "root@*" "$(cat "$MH/.ssh/sushi-ignore")"
+# match the marker and the stale source line, not the bare word — the checkout
+# path itself may legitimately contain "sshui"
+assert_lacks "drops the stale zshrc block marker" ">>> sshui >>>"      "$zshrc"
+assert_lacks "drops the stale source line"        "/old/path/sshui.zsh" "$zshrc"
+assert_has   "and adds the sushi one"             "sushi.zsh"           "$zshrc"
+assert_has   "leaving your own lines alone"      "export KEEP=1" "$zshrc"
+n="$(printf '%s\n' "$zshrc" | grep -c 'source')"
+assert_eq "only one source line remains" "1" "$n"
+
+# the migrated config must still be one sushi can read
+assert_has "sushi reads the adopted block" "legacy" "$(HOME="$MH" "$SUSHI" list)"
+
+# migration is idempotent
+HOME="$MH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
+n="$(grep -c 'managed hosts >>>' "$MH/.ssh/config")"
+assert_eq "re-running does not add another block" "1" "$n"
+
+# uninstall clears a legacy block even if that is all there is
+rm -rf "$MH"; mkdir -p "$MH/.ssh"
+printf '# mine\n# >>> sshui >>>\nsource "/old/sshui.zsh"\n# <<< sshui <<<\n' > "$MH/.zshrc"
+HOME="$MH" "$ROOT/install.sh" --uninstall >/dev/null 2>&1
+assert_lacks "uninstall removes a pre-rename block too" ">>> sshui >>>" "$(cat "$MH/.zshrc")"
 
 # --------------------------------------------------------------------------
 printf '\n'

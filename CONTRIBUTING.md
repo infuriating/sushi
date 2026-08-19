@@ -7,7 +7,7 @@ dependencies beyond fzf, no build step.
 
 ```bash
 ./test/run.sh
-shellcheck -S warning sshui install.sh test/run.sh
+shellcheck -S warning sushi install.sh test/run.sh
 ```
 
 Both must be clean. CI runs the same two things on Linux and macOS.
@@ -21,7 +21,7 @@ unsure, the macOS CI job will tell you.
 **Never lose the user's config.** Any change to the write path has to keep these properties, each
 of which has a test:
 
-- writes go inside the `# >>> sshui managed hosts >>>` markers, at the top of the file
+- writes go inside the `# >>> sushi managed hosts >>>` markers, at the top of the file
 - everything outside the markers is preserved byte-for-byte
 - a timestamped backup is taken before writing
 - the result is validated with `ssh -G` and discarded if it fails
@@ -54,14 +54,14 @@ admitting the gap.
 Three hidden subcommands dump intermediate state:
 
 ```bash
-sshui __candidates       # raw history scan:  count|user|host|port
-sshui __lines            # exactly what is piped into fzf
-sshui __preview foo      # the preview pane for one alias
-sshui __rmalias foo bar  # delete managed stanzas without the picker
+sushi __candidates       # raw history scan:  count|user|host|port
+sushi __lines            # exactly what is piped into fzf
+sushi __preview foo      # the preview pane for one alias
+sushi __rmalias foo bar  # delete managed stanzas without the picker
 ```
 
 Point them at a fixture rather than your real history:
 
 ```bash
-HOME=/tmp/fake ./sshui __candidates
+HOME=/tmp/fake ./sushi __candidates
 ```

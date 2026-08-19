@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Wires sshui into ~/.zshrc. Idempotent — safe to re-run after moving the repo
+# Wires sushi into ~/.zshrc. Idempotent — safe to re-run after moving the repo
 # or changing your mind about the mode.
 #
 #   ./install.sh                    install with the default mode (key,enter)
@@ -8,11 +8,11 @@
 #   ./install.sh --key='^G'         pick the key for `key` mode
 #   ./install.sh --uninstall        remove the block from ~/.zshrc
 #
-# Modes (see the header of sshui.zsh for the full description):
+# Modes (see the header of sushi.zsh for the full description):
 #   key     a keybinding puts a host on your command line
 #   enter   pressing ENTER on a bare `ssh` opens the picker
 #   wrap    `ssh` becomes a shell function  — shadows the command word
-#   off     load nothing; use the `sshui` command
+#   off     load nothing; use the `sushi` command
 # Combine with commas: --mode=key,enter
 #
 # Nothing is copied anywhere: the sourced file stays in this checkout, so
@@ -22,8 +22,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
-BEGIN="# >>> sshui >>>"
-END="# <<< sshui <<<"
+BEGIN="# >>> sushi >>>"
+END="# <<< sushi <<<"
 
 MODE=""
 KEY='^S'
@@ -43,30 +43,76 @@ for arg in "$@"; do
 done
 
 strip_block() {
+  local b="${1:-$BEGIN}" e="${2:-$END}"
   [ -f "$ZSHRC" ] || return 0
-  awk -v b="$BEGIN" -v e="$END" '
+  awk -v b="$b" -v e="$e" '
     index($0, b) { f = 1; next }
     index($0, e) { f = 0; next }
     !f' "$ZSHRC"
 }
 
+# This project used to be called sshui. Adopt what that version left behind,
+# rather than leaving an orphaned managed block in ~/.ssh/config — sushi would
+# not recognise the old markers and would add a second block, duplicating every
+# Host entry.
+migrate_legacy() {
+  local ssh_dir="${SSH_DIR:-$HOME/.ssh}"
+  local config="$ssh_dir/config"
+  local did=0
+
+  if [ -f "$config" ] && grep -Fq '# >>> sshui managed hosts >>>' "$config"; then
+    cp "$config" "$config.pre-sushi-rename"
+    sed -e 's/# >>> sshui managed hosts >>>/# >>> sushi managed hosts >>>/' \
+        -e 's/# <<< sshui managed hosts <<</# <<< sushi managed hosts <<</' \
+        -e 's/^# Managed by sshui\./# Managed by sushi./' \
+        "$config" > "$config.tmp" && mv "$config.tmp" "$config"
+    chmod 600 "$config"
+    info "migrated:    managed-host markers in $config (backup: $config.pre-sushi-rename)"
+    did=1
+  fi
+
+  if [ -f "$ssh_dir/sshui-ignore" ] && [ ! -f "$ssh_dir/sushi-ignore" ]; then
+    cp "$ssh_dir/sshui-ignore" "$ssh_dir/sushi-ignore"
+    chmod 600 "$ssh_dir/sushi-ignore"
+    info "migrated:    ignore list -> $ssh_dir/sushi-ignore"
+    did=1
+  fi
+
+  if [ -f "$ZSHRC" ] && grep -Fq '# >>> sshui >>>' "$ZSHRC"; then
+    cp "$ZSHRC" "$ZSHRC.pre-sushi-rename"
+    strip_block '# >>> sshui >>>' '# <<< sshui <<<' > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
+    info "migrated:    removed the old sshui block from $ZSHRC"
+    did=1
+  fi
+
+  [ "$did" = 1 ] && info ""
+  return 0
+}
+
 if [ "$ACTION" = "uninstall" ]; then
+  # also clear the pre-rename block, if this machine still has one
+  if [ -f "$ZSHRC" ] && grep -Fq '# >>> sshui >>>' "$ZSHRC"; then
+    strip_block '# >>> sshui >>>' '# <<< sshui <<<' > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
+    info "removed the pre-rename sshui block from $ZSHRC"
+  fi
   if [ -f "$ZSHRC" ] && grep -Fq "$BEGIN" "$ZSHRC"; then
-    cp "$ZSHRC" "$ZSHRC.sshui-backup"
+    cp "$ZSHRC" "$ZSHRC.sushi-backup"
     strip_block > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
-    info "removed the sshui block from $ZSHRC (backup: $ZSHRC.sshui-backup)"
+    info "removed the sushi block from $ZSHRC (backup: $ZSHRC.sushi-backup)"
     info "open a new shell to pick that up"
   else
-    info "nothing to remove: no sshui block in $ZSHRC"
+    info "nothing to remove: no sushi block in $ZSHRC"
   fi
   exit 0
 fi
 
-printf '\nsshui\n\n'
+printf '\nsushi\n\n'
 
-chmod +x "$HERE/sshui"
-info "engine:      $HERE/sshui"
-info "integration: $HERE/sshui.zsh"
+chmod +x "$HERE/sushi"
+info "engine:      $HERE/sushi"
+info "integration: $HERE/sushi.zsh"
+
+migrate_legacy
 
 # --- dependencies -----------------------------------------------------------
 command -v ssh >/dev/null 2>&1 || warn "ssh not found on PATH — that is unusual, check your setup"
@@ -123,35 +169,35 @@ fi
 touch "$ZSHRC"
 if grep -Fq "$BEGIN" "$ZSHRC"; then
   strip_block > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
-  info "replaced the existing sshui block in $ZSHRC"
+  info "replaced the existing sushi block in $ZSHRC"
 else
-  info "added a sshui block to $ZSHRC"
+  info "added a sushi block to $ZSHRC"
 fi
 
 # `: ${VAR:=x}` rather than `VAR=x`, so an exported value wins — that makes
-#   SSHUI_MODE=off zsh -i
+#   SUSHI_MODE=off zsh -i
 # a throwaway shell with the integration disabled, without editing anything.
 {
   printf '%s\n' "$BEGIN"
-  printf '%s\n' ": \${SSHUI_MODE:=$MODE}      # key | enter | wrap | off  (comma-separated)"
-  printf '%s\n' ": \${SSHUI_KEY:='$KEY'}"
-  printf '%s\n' "source \"$HERE/sshui.zsh\""
+  printf '%s\n' ": \${SUSHI_MODE:=$MODE}      # key | enter | wrap | off  (comma-separated)"
+  printf '%s\n' ": \${SUSHI_KEY:='$KEY'}"
+  printf '%s\n' "source \"$HERE/sushi.zsh\""
   printf '%s\n' "$END"
 } >> "$ZSHRC"
 
 # --- verify -----------------------------------------------------------------
 if command -v zsh >/dev/null 2>&1; then
-  probe="source '$HERE/sshui.zsh'"
+  probe="source '$HERE/sushi.zsh'"
   case ",$MODE," in
     *,wrap,*)  check="[[ \$(whence -w ssh) == 'ssh: function' ]]"; what="bare \`ssh\` opens the picker" ;;
-    *,key,*)   check="bindkey '$KEY' | grep -q sshui-insert-host"; what="$KEY opens the picker" ;;
-    *,enter,*) check="bindkey '^M' | grep -q sshui-accept-line"; what="ENTER on a bare \`ssh\` opens the picker" ;;
-    *)         check="true"; what="the sshui command is available" ;;
+    *,key,*)   check="bindkey '$KEY' | grep -q sushi-insert-host"; what="$KEY opens the picker" ;;
+    *,enter,*) check="bindkey '^M' | grep -q sushi-accept-line"; what="ENTER on a bare \`ssh\` opens the picker" ;;
+    *)         check="true"; what="the sushi command is available" ;;
   esac
-  if SSHUI_MODE="$MODE" SSHUI_KEY="$KEY" zsh -ic "$probe; $check" 2>/dev/null; then
+  if SUSHI_MODE="$MODE" SUSHI_KEY="$KEY" zsh -ic "$probe; $check" 2>/dev/null; then
     info "verified:    $what"
   else
-    warn "could not verify the integration loaded — try:  zsh -ic 'source $HERE/sshui.zsh; bindkey $KEY'"
+    warn "could not verify the integration loaded — try:  zsh -ic 'source $HERE/sushi.zsh; bindkey $KEY'"
   fi
 fi
 
@@ -167,10 +213,10 @@ Next:
       terminal's own integration — native SSH blocks, completions and all.
       A brand-new tab or pane is always safe.
 
-  $HERE/sshui scan -n
+  $HERE/sushi scan -n
       dry run — see what it found in your history, writes nothing
 
-  $HERE/sshui scan
+  $HERE/sushi scan
       import the hosts you pick into ~/.ssh/config
 
 Change your mind later:  $HERE/install.sh --mode=...

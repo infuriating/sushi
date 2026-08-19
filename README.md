@@ -1,8 +1,9 @@
-# sshui
+# sushi
 
 ![test](../../actions/workflows/test.yml/badge.svg)
 
-A fuzzy picker for your SSH hosts that builds itself from your shell history — then gets out of the way.
+*ssh + ui, rearranged.* A fuzzy picker for your SSH hosts that builds itself from your shell
+history — then gets out of the way.
 
 ```
 ssh ⏎
@@ -31,17 +32,17 @@ You have already told your machine about every server you use — you just told 
 place. `~/.zsh_history` is full of `ssh deploy@10.20.30.40 -p 2222`, typed for the hundredth time,
 while `~/.ssh/config` sits empty.
 
-sshui reads the history, extracts the destinations, and writes them into `~/.ssh/config` as real
+sushi reads the history, extracts the destinations, and writes them into `~/.ssh/config` as real
 `Host` stanzas. That last part is the point: **the output is native ssh config, not a private
 database.** Once a host is imported, `ssh staging`, `scp file staging:`, `rsync … staging:`,
-`git clone staging:repo` and `ssh <TAB>` completion all work — with or without sshui installed.
+`git clone staging:repo` and `ssh <TAB>` completion all work — with or without sushi installed.
 The picker is a convenience on top; the config is the deliverable.
 
 ## Install
 
 ```bash
-git clone https://github.com/infuriating/sshui.git ~/sshui
-cd ~/sshui
+git clone https://github.com/infuriating/sushi.git ~/sushi
+cd ~/sushi
 ./install.sh
 source ~/.zshrc
 ```
@@ -52,7 +53,7 @@ update. `./install.sh --uninstall` removes it again.
 Reload with `source ~/.zshrc`, not `exec zsh`. In Warp — or any terminal that injects shell
 integration at launch — `exec zsh` replaces the shell the terminal set up, and that pane loses the
 terminal's own features (native SSH blocks, completions) until you close it. A new tab or pane is
-always safe. Re-sourcing sshui is idempotent, so reloading repeatedly costs nothing.
+always safe. Re-sourcing sushi is idempotent, so reloading repeatedly costs nothing.
 
 Requires zsh, bash 3.2+ (macOS's system bash is fine) and [fzf](https://github.com/junegunn/fzf)
 for the picker. `scan` and `list` work without fzf.
@@ -60,8 +61,8 @@ for the picker. `scan` and `list` work without fzf.
 ## Use
 
 ```bash
-sshui scan -n     # dry run: what it found, sorted by how often you used it
-sshui scan        # pick hosts with TAB, import them into ~/.ssh/config
+sushi scan -n     # dry run: what it found, sorted by how often you used it
+sushi scan        # pick hosts with TAB, import them into ~/.ssh/config
 ssh               # the picker
 ssh staging       # untouched — goes straight to the real ssh
 ```
@@ -69,8 +70,8 @@ ssh staging       # untouched — goes straight to the real ssh
 …where `ssh` on its own opens the picker in the default mode. Inside it: type to filter, `ENTER` to
 connect, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan history. In the `scan` picker, `ctrl-x` dismisses rows.
 
-Other commands: `sshui list` prints the host table, `sshui edit` opens the config,
-`sshui choose` prints an alias instead of connecting (useful for your own scripts).
+Other commands: `sushi list` prints the host table, `sushi edit` opens the config,
+`sushi choose` prints an alias instead of connecting (useful for your own scripts).
 
 ### Making things go away
 
@@ -79,12 +80,12 @@ colleague's machine you SSH'd into once, a whole staging environment. Without so
 that, `scan` re-offers them forever.
 
 ```bash
-sshui delete              # pick things to get rid of  (alias: sshui ignore)
-sshui ignore 'root@*'     # or add patterns directly
-sshui ignore '*.staging.acme.tld'
-sshui ignore --list
-sshui ignore --remove     # picker; or pass patterns
-sshui ignore --edit       # open the file in $EDITOR
+sushi delete              # pick things to get rid of  (alias: sushi ignore)
+sushi ignore 'root@*'     # or add patterns directly
+sushi ignore '*.staging.acme.tld'
+sushi ignore --list
+sushi ignore --remove     # picker; or pass patterns
+sushi ignore --edit       # open the file in $EDITOR
 ```
 
 You can also dismiss rows without leaving `scan`: highlight one (or `TAB` several) and press
@@ -92,7 +93,7 @@ You can also dismiss rows without leaving `scan`: highlight one (or `TAB` severa
 and never come back. Nothing is imported and `~/.ssh/config` isn't touched — it's purely "stop
 showing me this".
 
-`sshui delete` is the standalone version, and its picker offers two kinds of entry:
+`sushi delete` is the standalone version, and its picker offers two kinds of entry:
 
 - **`scan`** — a candidate that hasn't been imported. Selecting it adds a pattern to the ignore
   list so it's never offered again.
@@ -100,11 +101,11 @@ showing me this".
   *and* adds the ignore pattern. Deleting without ignoring would just mean the next `scan` offers it
   straight back.
 
-Stanza deletion only ever touches the sshui-managed block, so hand-written entries are safe, and it
+Stanza deletion only ever touches the sushi-managed block, so hand-written entries are safe, and it
 goes through the same backup-and-`ssh -G`-validate path as import. A `Host` line naming several
 patterns loses only the ones you picked; it survives while any remain.
 
-The ignore list lives at `~/.ssh/sshui-ignore` (`SSHUI_IGNORE` to move it) — one glob per line,
+The ignore list lives at `~/.ssh/sushi-ignore` (`SUSHI_IGNORE` to move it) — one glob per line,
 `#` for comments, matched against both `user@host` and the bare host. It affects `scan` only;
 `~/.ssh/config` and the picker are never filtered by it. `scan` reports how many candidates it hid
 rather than quietly shrinking its list.
@@ -116,12 +117,12 @@ function called `ssh` — has a real cost. Terminals that ship their own `ssh` c
 anything Fig-derived) key off the `ssh` command word, and shadowing it with a function turns that
 completion off. So that mode exists, but it isn't the default.
 
-| `SSHUI_MODE` | How you open the picker | Shadows `ssh`? |
+| `SUSHI_MODE` | How you open the picker | Shadows `ssh`? |
 | --- | --- | --- |
 | `key` | a keybinding, `^S` by default | no |
 | `enter` | press ENTER on a line containing only `ssh` | no |
 | `wrap` | run `ssh` with no arguments | **yes** |
-| `off` | only the `sshui` command | no |
+| `off` | only the `sushi` command | no |
 
 Default is `key,enter` — combine any of them with commas.
 
@@ -134,11 +135,11 @@ contested territory — zsh-autosuggestions wraps it (and re-wraps on every `pre
 zsh-syntax-highlighting wraps it, terminals add their own. `zle -N accept-line …` silently destroys
 whoever held it, and which side loses depends on load order, so the same `.zshrc` ends up behaving
 differently in different shells. Binding `^M` and then delegating with `zle accept-line` — by name,
-not `.accept-line` — means sshui never owns the widget and every wrapper in the chain still runs.
-Set `SSHUI_RETURN` if you need a different key.
+not `.accept-line` — means sushi never owns the widget and every wrapper in the chain still runs.
+Set `SUSHI_RETURN` if you need a different key.
 
 `key` inserts at the cursor rather than replacing the line, which makes it useful beyond ssh —
-type `scp report.pdf ` then hit `^S` and you get the host appended. Set `SSHUI_KEY_ACCEPT=1` if
+type `scp report.pdf ` then hit `^S` and you get the host appended. Set `SUSHI_KEY_ACCEPT=1` if
 you'd rather it run immediately instead of leaving the line for you to edit.
 
 ```bash
@@ -154,19 +155,19 @@ All modes load only in interactive shells, so scripts, cron jobs and anything ca
 
 Warp — and anything else that gives ssh sessions special treatment — recognises a session by the
 **literal command line the shell runs**. A picker that connects on your behalf is invisible to it:
-the terminal saw `sshui`, not `ssh`. You lose the session chip, the remote directory indicator, and
+the terminal saw `sushi`, not `ssh`. You lose the session chip, the remote directory indicator, and
 block-level integration.
 
-So sshui never connects for you. Every mode ends with a real `ssh <host>` command line submitted
+So sushi never connects for you. Every mode ends with a real `ssh <host>` command line submitted
 from your prompt:
 
 - `key` inserts it into the line you're editing; you press ENTER
 - `enter` rewrites the buffer to `ssh <host>` immediately before it runs
-- bare `sshui` (and `sshui <query>`) pushes it onto your **next** prompt via zsh's `print -z`, so
+- bare `sushi` (and `sushi <query>`) pushes it onto your **next** prompt via zsh's `print -z`, so
   you press ENTER once more and the terminal sees a command you typed
 
 That last ENTER is the price of native integration. If you'd rather skip it and connect straight
-away, `SSHUI_EXEC=1` — with the understanding that Warp-style session detection then won't fire.
+away, `SUSHI_EXEC=1` — with the understanding that Warp-style session detection then won't fire.
 
 Either way the command lands in your shell history, so `↑` repeats it and the next `scan` sees it.
 
@@ -177,11 +178,11 @@ Either way the command lands in your shell history, so `↑` repeats it and the 
 | `~/.zsh_history`, `~/.bash_history`, `~/.zsh_sessions/*`, fish | user, host, port, **frequency** | the useful one |
 | `~/.ssh/config` | existing aliases | read, never duplicated |
 | `~/.ssh/known_hosts` | hostnames only | see below |
-| `~/.ssh/sshui-ignore` | what to leave out | see [Making things go away](#making-things-go-away) |
+| `~/.ssh/sushi-ignore` | what to leave out | see [Making things go away](#making-things-go-away) |
 
 `known_hosts` is the source everyone reaches for first and it is the weakest of the three. It
 stores host keys, so it has **no usernames at all**, and with `HashKnownHosts yes` — the default
-on most systems — the hostnames are SHA-1 hashed and cannot be recovered. sshui offers the
+on most systems — the hostnames are SHA-1 hashed and cannot be recovered. sushi offers the
 unhashed entries with a commented-out `# User ?` line rather than guessing.
 
 History parsing handles `-p`, `-l`, `-i`, `-o`, `-J` and friends, options before *or* after the
@@ -192,19 +193,19 @@ without — collapse into a single host.
 
 ## What it does to `~/.ssh/config`
 
-Everything sshui writes goes inside a marked block:
+Everything sushi writes goes inside a marked block:
 
 ```
-# >>> sshui managed hosts >>>
+# >>> sushi managed hosts >>>
 ...
-# <<< sshui managed hosts <<<
+# <<< sushi managed hosts <<<
 ```
 
 - **The block goes at the top of the file.** In `ssh_config` the *first* value found for a keyword
-  wins, so a `Host *` block above it would silently override every `User` and `Port` sshui wrote.
+  wins, so a `Host *` block above it would silently override every `User` and `Port` sushi wrote.
 - **Your content is never touched.** Hand-written stanzas, comments and `Include` directives are
   preserved verbatim, including edits you make inside the managed block.
-- **A backup is written on every change** (`config.sshui-backup-<timestamp>`, last five kept).
+- **A backup is written on every change** (`config.sushi-backup-<timestamp>`, last five kept).
 - **The result is validated with `ssh -G` before it is committed.** If ssh cannot parse it, the
   original file is left byte-identical and the run aborts. Validation is skipped if your config
   already fails to parse, so a pre-existing problem can't lock you out.
@@ -218,23 +219,25 @@ Everything sshui writes goes inside a marked block:
   alias, a `ProxyJump`, or a wrapper script won't be found.
 - Bare IPv6 literals (`ssh 2001:db8::1`) are skipped — indistinguishable from `host:port` without
   guessing.
-- The shell integration is zsh-only. bash and fish users can still use `sshui` as a command.
-- `SSHUI_MODE=wrap` disables terminal-native `ssh` completion, as described above. Use `enter`.
+- The shell integration is zsh-only. bash and fish users can still use `sushi` as a command.
+- `SUSHI_MODE=wrap` disables terminal-native `ssh` completion, as described above. Use `enter`.
 - `^S` is XOFF under legacy terminal flow control; `key` mode runs `stty -ixon` when that is the
   chosen key. Pass `--key='^G'` if you'd rather it left your tty settings alone.
 - Generated aliases are a best guess (first DNS label, or `srv-10-0-0-5` for an IP). Rename them —
   edits inside the managed block survive.
+- On Linux, `gnome-sushi` also installs a `/usr/bin/sushi` (a file previewer). If you have it, one
+  of the two wins on `$PATH`. macOS has no such clash.
 
 ## Tests
 
 ```bash
-./test/run.sh        # 110-odd assertions, no fzf or terminal needed
+./test/run.sh        # ~190 assertions, no fzf or terminal needed
 ./test/run.sh -v     # show every assertion
 ```
 
 The suite builds throwaway `$HOME`s and `.zshrc`s and checks the awkward parts: odd history lines,
 glob safety, port collapsing, hashed `known_hosts`, alias collisions, managed-block ordering,
-idempotency, refusal to write an unparseable config, what each `SSHUI_MODE` does and does not
+idempotency, refusal to write an unparseable config, what each `SUSHI_MODE` does and does not
 touch, and `install.sh` being idempotent and fully reversible. CI runs it on Linux and macOS — the
 macOS job exercises bash 3.2, which is what ships with the OS.
 
