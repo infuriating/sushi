@@ -43,58 +43,14 @@ for arg in "$@"; do
 done
 
 strip_block() {
-  local b="${1:-$BEGIN}" e="${2:-$END}"
   [ -f "$ZSHRC" ] || return 0
-  awk -v b="$b" -v e="$e" '
+  awk -v b="$BEGIN" -v e="$END" '
     index($0, b) { f = 1; next }
     index($0, e) { f = 0; next }
     !f' "$ZSHRC"
 }
 
-# This project used to be called sshui. Adopt what that version left behind,
-# rather than leaving an orphaned managed block in ~/.ssh/config — sushi would
-# not recognise the old markers and would add a second block, duplicating every
-# Host entry.
-migrate_legacy() {
-  local ssh_dir="${SSH_DIR:-$HOME/.ssh}"
-  local config="$ssh_dir/config"
-  local did=0
-
-  if [ -f "$config" ] && grep -Fq '# >>> sshui managed hosts >>>' "$config"; then
-    cp "$config" "$config.pre-sushi-rename"
-    sed -e 's/# >>> sshui managed hosts >>>/# >>> sushi managed hosts >>>/' \
-        -e 's/# <<< sshui managed hosts <<</# <<< sushi managed hosts <<</' \
-        -e 's/^# Managed by sshui\./# Managed by sushi./' \
-        "$config" > "$config.tmp" && mv "$config.tmp" "$config"
-    chmod 600 "$config"
-    info "migrated:    managed-host markers in $config (backup: $config.pre-sushi-rename)"
-    did=1
-  fi
-
-  if [ -f "$ssh_dir/sshui-ignore" ] && [ ! -f "$ssh_dir/sushi-ignore" ]; then
-    cp "$ssh_dir/sshui-ignore" "$ssh_dir/sushi-ignore"
-    chmod 600 "$ssh_dir/sushi-ignore"
-    info "migrated:    ignore list -> $ssh_dir/sushi-ignore"
-    did=1
-  fi
-
-  if [ -f "$ZSHRC" ] && grep -Fq '# >>> sshui >>>' "$ZSHRC"; then
-    cp "$ZSHRC" "$ZSHRC.pre-sushi-rename"
-    strip_block '# >>> sshui >>>' '# <<< sshui <<<' > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
-    info "migrated:    removed the old sshui block from $ZSHRC"
-    did=1
-  fi
-
-  [ "$did" = 1 ] && info ""
-  return 0
-}
-
 if [ "$ACTION" = "uninstall" ]; then
-  # also clear the pre-rename block, if this machine still has one
-  if [ -f "$ZSHRC" ] && grep -Fq '# >>> sshui >>>' "$ZSHRC"; then
-    strip_block '# >>> sshui >>>' '# <<< sshui <<<' > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
-    info "removed the pre-rename sshui block from $ZSHRC"
-  fi
   if [ -f "$ZSHRC" ] && grep -Fq "$BEGIN" "$ZSHRC"; then
     cp "$ZSHRC" "$ZSHRC.sushi-backup"
     strip_block > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
@@ -111,8 +67,6 @@ printf '\nsushi\n\n'
 chmod +x "$HERE/sushi"
 info "engine:      $HERE/sushi"
 info "integration: $HERE/sushi.zsh"
-
-migrate_legacy
 
 # --- dependencies -----------------------------------------------------------
 command -v ssh >/dev/null 2>&1 || warn "ssh not found on PATH — that is unusual, check your setup"

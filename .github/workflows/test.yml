@@ -35,7 +35,7 @@ jobs:
           ssh -V
 
       - name: shellcheck
-        run: shellcheck -S warning sshui install.sh test/run.sh
+        run: shellcheck -S warning sushi install.sh test/run.sh
 
       - name: tests
         run: ./test/run.sh -v
@@ -47,7 +47,7 @@ jobs:
           printf '# pre-existing\nexport KEEP=1\n' > "$HOME/.zshrc"
           ./install.sh
           ./install.sh
-          test "$(grep -c 'sshui.zsh' "$HOME/.zshrc")" -eq 1
+          test "$(grep -c 'sushi.zsh' "$HOME/.zshrc")" -eq 1
           ./install.sh --uninstall
           grep -q 'export KEEP=1' "$HOME/.zshrc"
-          ! grep -q 'sshui' "$HOME/.zshrc"
+          ! grep -q 'sushi' "$HOME/.zshrc"

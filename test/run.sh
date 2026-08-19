@@ -752,66 +752,6 @@ assert_has   "uninstall keeps your content" "export KEEP=1" "$zshrc"
 assert_lacks "uninstall removes everything sushi added" "sushi" "$zshrc"
 
 # --------------------------------------------------------------------------
-section "install.sh: migrating from the old sshui name"
-
-MH="$WORK/migrate"
-rm -rf "$MH"; mkdir -p "$MH/.ssh"
-cat > "$MH/.ssh/config" <<'EOF'
-# >>> sshui managed hosts >>>
-# Managed by sshui. Hand-edits are kept; delete a stanza to drop it.
-
-Host legacy
-    HostName legacy.example.com
-    User luca
-# <<< sshui managed hosts <<<
-
-Host handwritten
-    HostName hand.example.com
-EOF
-printf 'root@*\n' > "$MH/.ssh/sshui-ignore"
-printf '# mine\nexport KEEP=1\n# >>> sshui >>>\nsource "/old/path/sshui.zsh"\n# <<< sshui <<<\n' \
-  > "$MH/.zshrc"
-
-HOME="$MH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
-cfg="$(cat "$MH/.ssh/config")"
-zshrc="$(cat "$MH/.zshrc")"
-
-assert_has   "rewrites the managed-block markers"      "# >>> sushi managed hosts >>>" "$cfg"
-assert_lacks "no old markers survive"                  ">>> sshui managed"             "$cfg"
-assert_has   "the previously imported host is adopted" "Host legacy"                   "$cfg"
-assert_has   "hand-written stanzas survive migration"  "Host handwritten"              "$cfg"
-assert_has   "backs the config up before rewriting"    "legacy.example.com" \
-             "$(cat "$MH/.ssh/config.pre-sushi-rename")"
-
-# adopting the markers is what stops a second block appearing
-n="$(printf '%s\n' "$cfg" | grep -c 'managed hosts >>>')"
-assert_eq "exactly one managed block" "1" "$n"
-
-assert_has   "carries the ignore list over" "root@*" "$(cat "$MH/.ssh/sushi-ignore")"
-# match the marker and the stale source line, not the bare word — the checkout
-# path itself may legitimately contain "sshui"
-assert_lacks "drops the stale zshrc block marker" ">>> sshui >>>"      "$zshrc"
-assert_lacks "drops the stale source line"        "/old/path/sshui.zsh" "$zshrc"
-assert_has   "and adds the sushi one"             "sushi.zsh"           "$zshrc"
-assert_has   "leaving your own lines alone"      "export KEEP=1" "$zshrc"
-n="$(printf '%s\n' "$zshrc" | grep -c 'source')"
-assert_eq "only one source line remains" "1" "$n"
-
-# the migrated config must still be one sushi can read
-assert_has "sushi reads the adopted block" "legacy" "$(HOME="$MH" "$SUSHI" list)"
-
-# migration is idempotent
-HOME="$MH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
-n="$(grep -c 'managed hosts >>>' "$MH/.ssh/config")"
-assert_eq "re-running does not add another block" "1" "$n"
-
-# uninstall clears a legacy block even if that is all there is
-rm -rf "$MH"; mkdir -p "$MH/.ssh"
-printf '# mine\n# >>> sshui >>>\nsource "/old/sshui.zsh"\n# <<< sshui <<<\n' > "$MH/.zshrc"
-HOME="$MH" "$ROOT/install.sh" --uninstall >/dev/null 2>&1
-assert_lacks "uninstall removes a pre-rename block too" ">>> sshui >>>" "$(cat "$MH/.zshrc")"
-
-# --------------------------------------------------------------------------
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
   green "$PASS passed"; printf ', '; dim "$SKIP skipped"; printf '\n'
