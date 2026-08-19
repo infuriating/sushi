@@ -29,6 +29,7 @@
 #                           keypress, but the terminal never sees an `ssh`
 #                           command line — Warp's native SSH block and anything
 #                           else keying off the typed command won't trigger.
+#   SSHUI_RETURN=^M         key `enter` mode binds (the RETURN key)
 #   SSHUI_BIN=/path/to/sshui   override engine autodetection
 
 # Interactive shells only — scripts and cron must always get the real ssh.
@@ -38,6 +39,7 @@
 : ${SSHUI_KEY:=^S}
 : ${SSHUI_KEY_ACCEPT:=0}
 : ${SSHUI_EXEC:=0}
+: ${SSHUI_RETURN:=^M}
 
 # --- locate the engine ------------------------------------------------------
 if [[ -z ${SSHUI_BIN:-} ]]; then
@@ -55,7 +57,7 @@ if [[ -z $SSHUI_BIN || ! -x $SSHUI_BIN ]]; then
   print -u2 "sshui.zsh: can't find the sshui script — set SSHUI_BIN=/path/to/sshui"
   return 1
 fi
-typeset -g SSHUI_BIN SSHUI_MODE SSHUI_KEY SSHUI_KEY_ACCEPT SSHUI_EXEC
+typeset -g SSHUI_BIN SSHUI_MODE SSHUI_KEY SSHUI_KEY_ACCEPT SSHUI_EXEC SSHUI_RETURN
 
 # Hand a picked host back to the shell as a real command line.
 #
@@ -117,6 +119,18 @@ sshui-insert-host() {
 # --- mode: enter ------------------------------------------------------------
 # A line that is exactly `ssh` becomes `ssh <picked>`. `ssh` stays a real
 # command, so terminal-native completion is unaffected.
+#
+# This binds the RETURN key rather than redefining the `accept-line` widget.
+# accept-line is contested territory — zsh-autosuggestions wraps it (and
+# re-wraps on every precmd by default), zsh-syntax-highlighting wraps it, and
+# terminals add their own. `zle -N accept-line ...` silently destroys whoever
+# held it, and which side loses depends on load order, so the same .zshrc
+# behaves differently in different shells. Worse, wrapping a wrapper that has
+# already wrapped us builds an infinitely recursive chain.
+#
+# Binding ^M sidesteps all of it: we never own accept-line, we just delegate to
+# whatever owns it *at the time the key is pressed* — by name, not by `.accept-line`,
+# so any wrapper in place still runs.
 sshui-accept-line() {
   if [[ ${BUFFER//[[:space:]]/} == ssh ]]; then
     local target
@@ -130,7 +144,7 @@ sshui-accept-line() {
     BUFFER="ssh $target"
     CURSOR=$#BUFFER
   fi
-  zle .accept-line
+  zle accept-line
 }
 
 # --- mode: wrap -------------------------------------------------------------
@@ -159,7 +173,8 @@ if [[ ,$SSHUI_MODE, == *,key,* ]]; then
 fi
 
 if [[ ,$SSHUI_MODE, == *,enter,* ]]; then
-  zle -N accept-line sshui-accept-line
+  zle -N sshui-accept-line
+  bindkey "$SSHUI_RETURN" sshui-accept-line
   _sshui_applied=1
 fi
 

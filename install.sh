@@ -145,7 +145,7 @@ if command -v zsh >/dev/null 2>&1; then
   case ",$MODE," in
     *,wrap,*)  check="[[ \$(whence -w ssh) == 'ssh: function' ]]"; what="bare \`ssh\` opens the picker" ;;
     *,key,*)   check="bindkey '$KEY' | grep -q sshui-insert-host"; what="$KEY opens the picker" ;;
-    *,enter,*) check="zle -l | grep -q 'accept-line (sshui-accept-line)'"; what="ENTER on a bare \`ssh\` opens the picker" ;;
+    *,enter,*) check="bindkey '^M' | grep -q sshui-accept-line"; what="ENTER on a bare \`ssh\` opens the picker" ;;
     *)         check="true"; what="the sshui command is available" ;;
   esac
   if SSHUI_MODE="$MODE" SSHUI_KEY="$KEY" zsh -ic "$probe; $check" 2>/dev/null; then
@@ -159,8 +159,13 @@ cat <<EOF
 
 Next:
 
-  exec zsh
-      pick up the change in this shell
+  source ~/.zshrc
+      pick up the change in this pane. Re-sourcing is a no-op if already loaded.
+
+      Do NOT use \`exec zsh\` in Warp (or any terminal with shell integration):
+      it replaces the shell the terminal bootstrapped, and that pane loses the
+      terminal's own integration — native SSH blocks, completions and all.
+      A brand-new tab or pane is always safe.
 
   $HERE/sshui scan -n
       dry run — see what it found in your history, writes nothing

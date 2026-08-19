@@ -469,9 +469,53 @@ if command -v zsh >/dev/null 2>&1; then
 
   section "zsh integration: mode enter"
   assert_eq "leaves ssh a real command"  "ssh: command"  "$(zprobe enter 'whence -w ssh')"
-  assert_has "rebinds accept-line"       "accept-line (sshui-accept-line)" \
-                                         "$(zprobe enter 'zle -l | grep accept-line')"
-  assert_lacks "does not bind a key"     "sshui-insert-host" "$(zprobe enter "bindkey '^S'")"
+  assert_has "binds the RETURN key"      "sshui-accept-line" "$(zprobe enter "bindkey '^M'")"
+  assert_lacks "does not bind ^S"        "sshui-insert-host" "$(zprobe enter "bindkey '^S'")"
+  out="$(HOME="$H" zsh -ic "SSHUI_MODE=enter; SSHUI_RETURN='^J'; source '$Z'; bindkey '^J'" 2>&1 | tail -1)"
+  assert_has "honours a custom SSHUI_RETURN" "sshui-accept-line" "$out"
+
+  # It must NOT take ownership of the accept-line widget: zsh-autosuggestions,
+  # zsh-syntax-highlighting and terminal integrations all wrap it, `zle -N
+  # accept-line` destroys whoever held it, and the loser depends on load order.
+  assert_lacks "never takes over the accept-line widget" "sshui" \
+               "$(zprobe enter 'print -r -- $widgets[accept-line]')"
+
+  section "zsh integration: coexistence with widget-wrapping plugins"
+
+  # a stand-in for how zsh-autosuggestions wraps widgets
+  FAKE="$WORK/fakesuggest.zsh"
+  cat > "$FAKE" <<'PLUGIN'
+_fakesuggest_bound_accept-line() {
+  if [[ -n ${widgets[fakesuggest-orig-accept-line]-} ]]; then
+    zle fakesuggest-orig-accept-line
+  else
+    zle .accept-line
+  fi
+}
+case ${widgets[accept-line]-} in
+  user:*) zle -A accept-line fakesuggest-orig-accept-line ;;
+esac
+zle -N accept-line _fakesuggest_bound_accept-line
+PLUGIN
+
+  for ord in "'$Z' '$FAKE'" "'$FAKE' '$Z'"; do
+    label="$([ "${ord#\'$Z\'}" != "$ord" ] && echo "sshui first" || echo "plugin first")"
+    out="$(HOME="$H" zsh -ic "SSHUI_MODE=enter; source ${ord% *}; source ${ord#* }
+      print -r -- \"W=\$widgets[accept-line] K=\$(bindkey '^M')\"" 2>&1 | tail -1)"
+    assert_has "$label: the plugin keeps accept-line" "_fakesuggest_bound_accept-line" "$out"
+    assert_has "$label: sshui still owns RETURN"      "sshui-accept-line"              "$out"
+  done
+
+  # Re-sourcing must be a no-op. `source ~/.zshrc` to reload is the documented
+  # advice for terminals where `exec zsh` throws away their shell integration,
+  # so sourcing twice — with a widget-wrapping plugin in between — has to be safe.
+  out="$(HOME="$H" zsh -ic "SSHUI_MODE=key,enter
+    source '$Z'; source '$FAKE'; source '$Z'; source '$Z'
+    print -r -- \"W=\$widgets[accept-line] M=\$(bindkey '^M') S=\$(bindkey '^S')\"" 2>&1 | tail -1)"
+  assert_has   "re-sourcing leaves accept-line with the plugin" "_fakesuggest_bound_accept-line" "$out"
+  assert_has   "re-sourcing keeps RETURN bound once"            "sshui-accept-line" "$out"
+  assert_has   "re-sourcing keeps ^S bound"                     "sshui-insert-host" "$out"
+  assert_lacks "re-sourcing does not chain sshui onto itself"   "sshui-accept-line sshui" "$out"
 
   section "zsh integration: mode wrap"
   assert_eq "shadows ssh with a function" "ssh: function" "$(zprobe wrap 'whence -w ssh')"
@@ -485,9 +529,8 @@ if command -v zsh >/dev/null 2>&1; then
   assert_has "an unrecognised mode warns" "matched nothing"   "$(zprobe bogus 'true')"
 
   section "zsh integration: combined modes"
-  assert_has "key,enter binds the key"      "sshui-insert-host" "$(zprobe key,enter "bindkey '^S'")"
-  assert_has "key,enter rebinds accept-line" "sshui-accept-line" \
-                                             "$(zprobe key,enter 'zle -l | grep accept-line')"
+  assert_has "key,enter binds ^S"           "sshui-insert-host" "$(zprobe key,enter "bindkey '^S'")"
+  assert_has "key,enter binds RETURN"       "sshui-accept-line" "$(zprobe key,enter "bindkey '^M'")"
   assert_eq  "key,enter leaves ssh a real command" "ssh: command" "$(zprobe key,enter 'whence -w ssh')"
 else
   skip "zsh integration" "zsh not installed"

@@ -43,11 +43,16 @@ The picker is a convenience on top; the config is the deliverable.
 git clone https://github.com/infuriating/sshui.git ~/sshui
 cd ~/sshui
 ./install.sh
-exec zsh
+source ~/.zshrc
 ```
 
 `install.sh` adds one `source` line to `~/.zshrc` and copies nothing, so `git pull` is a complete
 update. `./install.sh --uninstall` removes it again.
+
+Reload with `source ~/.zshrc`, not `exec zsh`. In Warp — or any terminal that injects shell
+integration at launch — `exec zsh` replaces the shell the terminal set up, and that pane loses the
+terminal's own features (native SSH blocks, completions) until you close it. A new tab or pane is
+always safe. Re-sourcing sshui is idempotent, so reloading repeatedly costs nothing.
 
 Requires zsh, bash 3.2+ (macOS's system bash is fine) and [fzf](https://github.com/junegunn/fzf)
 for the picker. `scan` and `list` work without fzf.
@@ -83,9 +88,17 @@ completion off. So that mode exists, but it isn't the default.
 
 Default is `key,enter` — combine any of them with commas.
 
-`enter` is the interesting one: it rebinds zsh's `accept-line` widget, so a buffer of exactly `ssh`
-gets rewritten to `ssh <picked-host>` a moment before it runs. You get the same "just type ssh"
-feel as `wrap`, but `ssh` stays a real command, so native completion keeps working.
+`enter` is the interesting one: it binds the RETURN key, and if the buffer is exactly `ssh` it
+rewrites it to `ssh <picked-host>` a moment before running. You get the same "just type ssh" feel
+as `wrap`, but `ssh` stays a real command, so native completion keeps working.
+
+It binds the *key* rather than redefining the `accept-line` *widget* on purpose. `accept-line` is
+contested territory — zsh-autosuggestions wraps it (and re-wraps on every `precmd` by default),
+zsh-syntax-highlighting wraps it, terminals add their own. `zle -N accept-line …` silently destroys
+whoever held it, and which side loses depends on load order, so the same `.zshrc` ends up behaving
+differently in different shells. Binding `^M` and then delegating with `zle accept-line` — by name,
+not `.accept-line` — means sshui never owns the widget and every wrapper in the chain still runs.
+Set `SSHUI_RETURN` if you need a different key.
 
 `key` inserts at the cursor rather than replacing the line, which makes it useful beyond ssh —
 type `scp report.pdf ` then hit `^S` and you get the host appended. Set `SSHUI_KEY_ACCEPT=1` if
