@@ -47,14 +47,25 @@ if [[ -z ${SUSHI_BIN:-} ]]; then
   _sushi_dir=${${(%):-%x}:A:h}
   if [[ -x $_sushi_dir/sushi ]]; then
     SUSHI_BIN=$_sushi_dir/sushi
+  elif [[ -f $_sushi_dir/sushi ]]; then
+    # there but not executable — worth saying so, since "not found" sends you
+    # looking for a missing file instead of a missing mode bit
+    print -u2 "sushi.zsh: $_sushi_dir/sushi is not executable. Fix with:"
+    print -u2 "    chmod +x $_sushi_dir/sushi"
+    unset _sushi_dir
+    return 1
   else
     SUSHI_BIN=${commands[sushi]:-}
   fi
   unset _sushi_dir
 fi
 
-if [[ -z $SUSHI_BIN || ! -x $SUSHI_BIN ]]; then
+if [[ -z $SUSHI_BIN ]]; then
   print -u2 "sushi.zsh: can't find the sushi script — set SUSHI_BIN=/path/to/sushi"
+  return 1
+fi
+if [[ ! -x $SUSHI_BIN ]]; then
+  print -u2 "sushi.zsh: SUSHI_BIN=$SUSHI_BIN is not executable — chmod +x it"
   return 1
 fi
 typeset -g SUSHI_BIN SUSHI_MODE SUSHI_KEY SUSHI_KEY_ACCEPT SUSHI_EXEC SUSHI_RETURN
