@@ -67,10 +67,47 @@ ssh staging       # untouched — goes straight to the real ssh
 ```
 
 …where `ssh` on its own opens the picker in the default mode. Inside it: type to filter, `ENTER` to
-connect, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan history.
+connect, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan history. In the `scan` picker, `ctrl-x` dismisses rows.
 
 Other commands: `sshui list` prints the host table, `sshui edit` opens the config,
 `sshui choose` prints an alias instead of connecting (useful for your own scripts).
+
+### Making things go away
+
+Your history accumulates hosts you'll never use again — a box that's been decommissioned, a
+colleague's machine you SSH'd into once, a whole staging environment. Without somewhere to record
+that, `scan` re-offers them forever.
+
+```bash
+sshui delete              # pick things to get rid of  (alias: sshui ignore)
+sshui ignore 'root@*'     # or add patterns directly
+sshui ignore '*.staging.acme.tld'
+sshui ignore --list
+sshui ignore --remove     # picker; or pass patterns
+sshui ignore --edit       # open the file in $EDITOR
+```
+
+You can also dismiss rows without leaving `scan`: highlight one (or `TAB` several) and press
+**`ctrl-x`**. They're added to the ignore list and the list reloads, so they disappear on the spot
+and never come back. Nothing is imported and `~/.ssh/config` isn't touched — it's purely "stop
+showing me this".
+
+`sshui delete` is the standalone version, and its picker offers two kinds of entry:
+
+- **`scan`** — a candidate that hasn't been imported. Selecting it adds a pattern to the ignore
+  list so it's never offered again.
+- **`imported`** — a host already in `~/.ssh/config`. Selecting it **deletes its `Host` stanza**
+  *and* adds the ignore pattern. Deleting without ignoring would just mean the next `scan` offers it
+  straight back.
+
+Stanza deletion only ever touches the sshui-managed block, so hand-written entries are safe, and it
+goes through the same backup-and-`ssh -G`-validate path as import. A `Host` line naming several
+patterns loses only the ones you picked; it survives while any remain.
+
+The ignore list lives at `~/.ssh/sshui-ignore` (`SSHUI_IGNORE` to move it) — one glob per line,
+`#` for comments, matched against both `user@host` and the bare host. It affects `scan` only;
+`~/.ssh/config` and the picker are never filtered by it. `scan` reports how many candidates it hid
+rather than quietly shrinking its list.
 
 ### Shell integration modes
 
@@ -140,6 +177,7 @@ Either way the command lands in your shell history, so `↑` repeats it and the 
 | `~/.zsh_history`, `~/.bash_history`, `~/.zsh_sessions/*`, fish | user, host, port, **frequency** | the useful one |
 | `~/.ssh/config` | existing aliases | read, never duplicated |
 | `~/.ssh/known_hosts` | hostnames only | see below |
+| `~/.ssh/sshui-ignore` | what to leave out | see [Making things go away](#making-things-go-away) |
 
 `known_hosts` is the source everyone reaches for first and it is the weakest of the three. It
 stores host keys, so it has **no usernames at all**, and with `HashKnownHosts yes` — the default

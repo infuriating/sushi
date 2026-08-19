@@ -26,6 +26,16 @@ of which has a test:
 - a timestamped backup is taken before writing
 - the result is validated with `ssh -G` and discarded if it fails
 - `~/.ssh` stays `700`, the config stays `600`
+- deletion only ever removes stanzas from inside the markers
+
+Everything that rewrites the config goes through `commit_managed`, which takes the whole new block
+body and handles backup, blank-line collapsing, validation and permissions. `install_block` (append)
+and `remove_managed_aliases` (delete) are thin wrappers over it. Add a third operation the same way
+rather than writing to `$CONFIG` directly.
+
+**Mind the subshell.** `scan_candidates` is consumed via `done < <(...)`, so it runs in a child
+process — a counter incremented inside it never reaches the caller. That bit us once with the
+ignore-list tally. Filter and count in the caller's loop, where the body runs in the current shell.
 
 **Add a test with the fix.** `test/run.sh` needs no fzf and no terminal — it builds throwaway
 `$HOME`s and asserts on output. Copy the nearest existing section; the helpers are `assert_eq`,
@@ -44,9 +54,10 @@ admitting the gap.
 Three hidden subcommands dump intermediate state:
 
 ```bash
-sshui __candidates   # raw history scan:  count|user|host|port
-sshui __lines        # exactly what is piped into fzf
-sshui __preview foo  # the preview pane for one alias
+sshui __candidates       # raw history scan:  count|user|host|port
+sshui __lines            # exactly what is piped into fzf
+sshui __preview foo      # the preview pane for one alias
+sshui __rmalias foo bar  # delete managed stanzas without the picker
 ```
 
 Point them at a fixture rather than your real history:

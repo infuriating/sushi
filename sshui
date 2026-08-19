@@ -6,18 +6,22 @@
 #   sshui <query>      open the picker pre-filtered
 #   sshui scan         discover user@host from shell history, import into ~/.ssh/config
 #   sshui scan -n      dry run: show what scan would add, write nothing
+#   sshui ignore       stop scan offering something (also: delete, rm)
+#   sshui ignore -l    show the ignore list
 #   sshui list         print the host table (no fzf needed)
 #   sshui edit         open ~/.ssh/config in $EDITOR
 #   sshui choose       print the chosen alias instead of connecting
 #
 # Requires: bash 3.2+, awk, ssh. fzf only for the picker.
 # Shell integration (bare `ssh` opens the picker) lives in sshui.zsh.
+# Files: ~/.ssh/config (SSHUI_CONFIG), ~/.ssh/sshui-ignore (SSHUI_IGNORE)
 
 set -uo pipefail
 
 SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 SSH_DIR="${SSH_DIR:-$HOME/.ssh}"
 CONFIG="${SSHUI_CONFIG:-$SSH_DIR/config}"
+IGNORE="${SSHUI_IGNORE:-$SSH_DIR/sshui-ignore}"
 BEGIN_MARK="# >>> sshui managed hosts >>>"
 END_MARK="# <<< sshui managed hosts <<<"
 
@@ -256,9 +260,9 @@ config_without_managed() {
     'index($0, b) { f = 1; next } index($0, e) { f = 0; next } !f' "$CONFIG"
 }
 
-# $1 = file holding the new Host stanzas to add
-install_block() {
-  local additions="$1" stamp backup tmp
+# $1 = file holding the ENTIRE new managed-block body (replaces what's there)
+commit_managed() {
+  local body="$1" stamp backup tmp
   stamp="$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$SSH_DIR"; chmod 700 "$SSH_DIR" 2>/dev/null
   [ -f "$CONFIG" ] || { : > "$CONFIG"; chmod 600 "$CONFIG"; }
@@ -273,8 +277,7 @@ install_block() {
     printf '%s\n' "# Kept at the top of the file: in ssh_config the FIRST value for a"
     printf '%s\n' "# keyword wins, so a later 'Host *' block can't override these."
     printf '\n'
-    managed_block
-    cat "$additions"
+    cat "$body"
     printf '%s\n' "$END_MARK"
     printf '\n'
     config_without_managed
@@ -305,19 +308,125 @@ install_block() {
   done
 }
 
+# $1 = file holding new Host stanzas to append to the managed block
+install_block() {
+  local body
+  body="$(mktemp "${TMPDIR:-/tmp}/sshui-body.XXXXXX")" || die "mktemp failed"
+  { managed_block; cat "$1"; } > "$body"
+  commit_managed "$body"
+  rm -f "$body"
+}
+
+# Drop the named aliases from the managed block. A stanza whose Host line lists
+# several patterns loses only the named ones; it survives if any remain.
+# $1 = newline-separated alias names
+remove_managed_aliases() {
+  local names="$1" body
+  body="$(mktemp "${TMPDIR:-/tmp}/sshui-body.XXXXXX")" || die "mktemp failed"
+  managed_block | awk -v names="$names" '
+    BEGIN { n = split(names, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") kill[a[i]] = 1 }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (tolower(line) ~ /^host[[:space:]]/) {
+        split(line, f, /[[:space:]]+/)
+        keep = ""
+        for (i = 2; i in f; i++) if (f[i] != "" && !(f[i] in kill)) keep = keep " " f[i]
+        if (keep == "") { skip = 1; next }
+        skip = 0
+        print "Host" keep
+        next
+      }
+      if (!skip) print
+    }' > "$body"
+  commit_managed "$body"
+  rm -f "$body"
+}
+
+# ---------------------------------------------------------------- ignore list --
+
+# Non-empty, non-comment entries, whitespace trimmed.
+ignore_entries() {
+  [ -r "$IGNORE" ] || return 0
+  sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' "$IGNORE" | grep -v '^$'
+}
+
+# is_ignored <user> <host> — patterns match `user@host` or the bare host, glob-style
+is_ignored() {
+  local user="$1" host="$2" pat
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    # shellcheck disable=SC2254  # unquoted on purpose: entries are glob patterns
+    case "$user@$host" in $pat) return 0 ;; esac
+    # shellcheck disable=SC2254
+    case "$host" in $pat) return 0 ;; esac
+  done <<EOF
+$(ignore_entries)
+EOF
+  return 1
+}
+
+ignore_add() {
+  local added=0 pat existing
+  existing="$(ignore_entries)"
+  mkdir -p "$SSH_DIR"; chmod 700 "$SSH_DIR" 2>/dev/null
+  if [ ! -f "$IGNORE" ]; then
+    {
+      printf '%s\n' "# sshui ignore list — one glob pattern per line, '#' starts a comment."
+      printf '%s\n' "# Matched against 'user@host' and against the bare host."
+      printf '%s\n' "# Entries here are skipped by 'sshui scan'; ~/.ssh/config is untouched."
+      printf '%s\n' "#   root@*            any root login"
+      printf '%s\n' "#   *.staging.acme.tld   a whole environment"
+      printf '\n'
+    } > "$IGNORE"
+    chmod 600 "$IGNORE"
+  fi
+  for pat in "$@"; do
+    [ -n "$pat" ] || continue
+    if printf '%s\n' "$existing" | grep -Fxq "$pat"; then
+      printf '  already ignored: %s\n' "$pat"
+      continue
+    fi
+    printf '%s\n' "$pat" >> "$IGNORE"
+    existing="$existing
+$pat"
+    printf '  ignoring: %s\n' "$pat"
+    added=$((added + 1))
+  done
+  [ "$added" -gt 0 ] && printf '\nWrote %s\n' "$IGNORE"
+  return 0
+}
+
+ignore_remove() {
+  local pat tmp
+  [ -r "$IGNORE" ] || { warn "no ignore list at $IGNORE"; return 1; }
+  tmp="$(mktemp "${TMPDIR:-/tmp}/sshui-ign.XXXXXX")" || die "mktemp failed"
+  cp "$IGNORE" "$tmp"
+  for pat in "$@"; do
+    [ -n "$pat" ] || continue
+    awk -v p="$pat" '
+      { line = $0; sub(/#.*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line) }
+      line == p { next }
+      { print }' "$tmp" > "$tmp.new" && mv "$tmp.new" "$tmp"
+    printf '  no longer ignoring: %s\n' "$pat"
+  done
+  cat "$tmp" > "$IGNORE" && chmod 600 "$IGNORE"
+  rm -f "$tmp"
+  printf '\nWrote %s\n' "$IGNORE"
+}
+
 # ---------------------------------------------------------------- subcommands --
 
-cmd_scan() {
-  local dry=0
-  [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ] && dry=1
-
+# Everything scan could offer: count|user|host|port, one per line. The ignore
+# list is NOT applied here — callers filter, because this runs in a subshell
+# (process substitution) and a count set in here would never reach the caller.
+scan_candidates() {
   local cfg known_pairs known_aliases known_names
   cfg="$(config_hosts)"
   known_pairs="$(printf '%s\n'   "$cfg" | awk -F'\t' '{ print tolower($2) "|" tolower($3) }')"
   known_aliases="$(printf '%s\n' "$cfg" | awk -F'\t' '{ print tolower($1) }')"
   known_names="$(printf '%s\n'   "$cfg" | awk -F'\t' '{ print tolower($2) }')"
 
-  local -a rows=()
   local count user host port key hostlc seen_hosts=""
   while IFS="$SEP" read -r count user host port; do
     [ -n "${host:-}" ] || continue
@@ -326,7 +435,7 @@ cmd_scan() {
     key="$hostlc|$(printf '%s' "$user" | tr 'A-Z' 'a-z')"
     printf '%s\n' "$known_pairs"   | grep -Fxq "$key"    && continue
     printf '%s\n' "$known_aliases" | grep -Fxq "$hostlc" && continue
-    rows+=("$count$SEP$user$SEP$host$SEP$port")
+    printf '%s\n' "$count$SEP$user$SEP$host$SEP$port"
     seen_hosts="$seen_hosts
 $hostlc"
   done < <(scan_history)
@@ -340,42 +449,83 @@ $hostlc"
     printf '%s\n' "$known_names"   | grep -Fxq "$hostlc" && continue
     printf '%s\n' "$known_aliases" | grep -Fxq "$hostlc" && continue
     printf '%s\n' "$seen_hosts"    | grep -Fxq "$hostlc" && continue
-    rows+=("0$SEP$SEP$host$SEP")
+    printf '%s\n' "0$SEP$SEP$host$SEP"
   done < <(scan_known_hosts)
+}
 
-  if [ "${#rows[@]}" -eq 0 ]; then
+# Turn candidate records on stdin into the scan picker's fzf input: three
+# tab-separated columns —
+#   1 what you see   2 the count|user|host|port record   3 an ignore pattern
+# Only column 1 is displayed; 2 is what import consumes, 3 is what ctrl-x feeds
+# to `sshui ignore`. Ignored candidates are dropped here.
+menu_from_candidates() {
+  local line count user host port
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    IFS="$SEP" read -r count user host port <<< "$line"
+    [ -n "${host:-}" ] || continue
+    is_ignored "$user" "$host" && continue
+    if [ "$count" = "0" ]; then
+      printf '%s\t%s\t%s\n' \
+        "$(printf '%11s  %s%s' 'known_hosts' "$host" "${port:+:$port}")" "$line" "$host"
+    else
+      printf '%s\t%s\t%s\n' \
+        "$(printf '%10sx  %s%s%s' "$count" "${user:+$user@}" "$host" "${port:+:$port}")" \
+        "$line" "${user:+$user@}$host"
+    fi
+  done
+}
+
+# Used by `sshui __scanmenu`, which fzf calls to reload after ctrl-x.
+scan_menu() { scan_candidates | menu_from_candidates; }
+
+cmd_scan() {
+  local dry=0
+  [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ] && dry=1
+
+  # one pass over the history; the menu and the hidden tally both come from it
+  local all menu selected count user host port hidden=0
+  all="$(scan_candidates)"
+  menu="$(printf '%s\n' "$all" | menu_from_candidates)"
+
+  while IFS="$SEP" read -r count user host port; do
+    [ -n "${host:-}" ] || continue
+    is_ignored "$user" "$host" && hidden=$((hidden + 1))
+  done <<EOF
+$all
+EOF
+
+  local hidden_note=""
+  [ "$hidden" -gt 0 ] && hidden_note=" · $hidden hidden by the ignore list"
+  if [ -z "$menu" ]; then
     printf 'Nothing new found — %s already covers every host in your history.\n' "$CONFIG"
+    [ "$hidden" -gt 0 ] && printf '(%s also hidden by %s — see: sshui ignore --list)\n' "$hidden" "$IGNORE"
     return 0
   fi
-
-  # ---- pick which ones to import
-  local selected menu r
-  menu="$(for r in "${rows[@]}"; do
-    IFS="$SEP" read -r count user host port <<< "$r"
-    if [ "$count" = "0" ]; then
-      printf '%s\t%s\n' "$(printf '%11s  %s%s' 'known_hosts' "$host" "${port:+:$port}")" "$r"
-    else
-      printf '%s\t%s\n' \
-        "$(printf '%10sx  %s%s%s' "$count" "${user:+$user@}" "$host" "${port:+:$port}")" "$r"
-    fi
-  done)"
+  [ "$hidden" -gt 0 ] && printf '(%s hidden by %s — see: sshui ignore --list)\n' "$hidden" "$IGNORE"
 
   if [ "$dry" -eq 1 ] || [ -n "${SSHUI_ALL:-}" ] || ! have fzf || [ ! -t 0 ]; then
-    selected="$(printf '%s\n' "$menu" | cut -f2-)"
+    selected="$(printf '%s\n' "$menu" | cut -f2)"
     if [ "$dry" -eq 0 ] && [ -z "${SSHUI_ALL:-}" ]; then
       have fzf || warn "fzf not found — falling back to importing everything"
       [ -t 0 ] || warn "no terminal for interactive selection — importing everything"
     fi
   else
+    # ctrl-x adds the highlighted (or tab-selected) rows to the ignore list and
+    # reloads, so they vanish from the list here and from every future scan.
     selected="$(printf '%s\n' "$menu" | fzf --multi --delimiter='\t' --with-nth=1 \
       --height=80% --reverse --border --prompt='import ❯ ' \
-      --header=$'TAB select · ctrl-a all · ENTER import · ESC cancel\nsorted by how often you used them' \
-      --bind 'ctrl-a:select-all' | cut -f2-)"
+      --header="TAB select · ctrl-a all · ENTER import · ctrl-x never show again · ESC cancel
+sorted by how often you used them$hidden_note" \
+      --bind 'ctrl-a:select-all' \
+      --bind "ctrl-x:execute-silent('$SELF' ignore {+3})+reload('$SELF' __scanmenu)" \
+      | cut -f2)"
     [ -n "$selected" ] || { printf 'Nothing selected.\n'; return 0; }
   fi
 
   # ---- build stanzas with collision-free aliases
-  local taken="$known_aliases" additions name candidate i
+  local taken additions name candidate i
+  taken="$(config_hosts | awk -F'\t' '{ print tolower($1) }')"
   additions="$(mktemp "${TMPDIR:-/tmp}/sshui-add.XXXXXX")" || die "mktemp failed"
   while IFS="$SEP" read -r count user host port; do
     [ -n "${host:-}" ] || continue
@@ -422,6 +572,141 @@ $name"
     *) printf 'Cancelled.\n' ;;
   esac
   rm -f "$additions"
+}
+
+# sshui ignore / sshui delete
+#
+#   sshui ignore                 pick things to stop seeing (and drop imported ones)
+#   sshui ignore <pattern>...    add patterns without the picker
+#   sshui ignore --list          show the ignore list
+#   sshui ignore --remove [pat]  un-ignore (picker if no pattern given)
+#   sshui ignore --edit          open the ignore list in $EDITOR
+cmd_ignore() {
+  case "${1:-}" in
+    --list|-l)
+      if [ -s "$IGNORE" ]; then
+        printf '%s\n' "$IGNORE"
+        printf -- '---\n'
+        ignore_entries
+      else
+        printf 'Nothing ignored yet (%s)\n' "$IGNORE"
+      fi
+      return 0
+      ;;
+    --edit|-e)
+      [ -f "$IGNORE" ] || ignore_add >/dev/null   # create with the header comment
+      exec "${EDITOR:-vi}" "$IGNORE"
+      ;;
+    --remove|-r|--unignore)
+      shift
+      if [ "$#" -gt 0 ]; then
+        ignore_remove "$@"
+        return $?
+      fi
+      local cur sel
+      cur="$(ignore_entries)"
+      [ -n "$cur" ] || { printf 'Nothing ignored yet (%s)\n' "$IGNORE"; return 0; }
+      if have fzf && [ -t 0 ]; then
+        sel="$(printf '%s\n' "$cur" | fzf --multi --height=60% --reverse --border \
+          --prompt='un-ignore ❯ ' --header='TAB select · ENTER confirm · ESC cancel' \
+          --bind 'ctrl-a:select-all')"
+        [ -n "$sel" ] || { printf 'Nothing selected.\n'; return 0; }
+      else
+        warn "no fzf/terminal — pass patterns as arguments instead"
+        return 1
+      fi
+      # shellcheck disable=SC2046  # deliberate word splitting on newlines
+      local -a args=()
+      while IFS= read -r line; do [ -n "$line" ] && args+=("$line"); done <<EOF
+$sel
+EOF
+      ignore_remove "${args[@]}"
+      return $?
+      ;;
+    --help|-h)
+      sed -n '/^# sshui ignore \/ sshui delete/,/^cmd_ignore/p' "$0" \
+        | sed '$d' | sed 's/^# \{0,1\}//'
+      return 0
+      ;;
+    -*)
+      die "unknown option: $1 (try: sshui ignore --help)"
+      ;;
+    "")
+      ;;
+    *)
+      ignore_add "$@"
+      return $?
+      ;;
+  esac
+
+  # ---- interactive: offer scan candidates AND hosts already in the config
+  local -a rows=()
+  local line count user host port target
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    IFS="$SEP" read -r count user host port <<< "$line"
+    target="${user:+$user@}$host"
+    rows+=("$(printf '%-9s %-42s %s' 'scan' "$target" "$target")")
+  done < <(scan_candidates)
+
+  local managed
+  managed="$(managed_block | awk '{ l = $0; sub(/^[[:space:]]+/, "", l)
+    if (tolower(l) ~ /^host[[:space:]]/) { for (i = 2; i <= NF; i++) print $i } }')"
+
+  local alias_ tgt
+  while IFS= read -r alias_; do
+    [ -n "$alias_" ] || continue
+    tgt="$(config_hosts | awk -F'\t' -v a="$alias_" \
+      '$1 == a { printf "%s%s", ($3 != "" ? $3 "@" : ""), $2 }')"
+    rows+=("$(printf '%-9s %-42s %s' 'imported' "$alias_  ($tgt)" "$alias_")")
+  done <<EOF
+$managed
+EOF
+
+  if [ "${#rows[@]}" -eq 0 ]; then
+    printf 'Nothing to ignore: no scan candidates and no sshui-managed hosts.\n'
+    return 0
+  fi
+
+  local sel
+  if have fzf && [ -t 0 ]; then
+    sel="$(printf '%s\n' "${rows[@]}" | sort -u | fzf --multi --height=80% --reverse --border \
+      --prompt='ignore ❯ ' \
+      --header=$'TAB select · ENTER confirm · ESC cancel\nscan = never offer again · imported = also delete its Host stanza' \
+      --bind 'ctrl-a:select-all')"
+    [ -n "$sel" ] || { printf 'Nothing selected.\n'; return 0; }
+  else
+    warn "no fzf/terminal — pass patterns as arguments: sshui ignore 'root@*'"
+    return 1
+  fi
+
+  # ---- split the selection into patterns to ignore and aliases to delete
+  local -a pats=() dels=()
+  local kind rest
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    kind="${line%% *}"
+    rest="${line##* }"
+    case "$kind" in
+      imported) dels+=("$rest"); pats+=("$(config_hosts | awk -F'\t' -v a="$rest" \
+                  '$1 == a { printf "%s%s", ($3 != "" ? $3 "@" : ""), $2 }')") ;;
+      *)        pats+=("$rest") ;;
+    esac
+  done <<EOF
+$sel
+EOF
+
+  printf '\n'
+  [ "${#dels[@]}" -gt 0 ] && printf 'Deleting from the managed block: %s\n' "${dels[*]}"
+  printf 'Adding to the ignore list:\n'
+  ignore_add "${pats[@]}"
+
+  if [ "${#dels[@]}" -gt 0 ]; then
+    local names=""
+    for alias_ in "${dels[@]}"; do names="$names
+$alias_"; done
+    remove_managed_aliases "$names"
+  fi
 }
 
 cmd_list() {
@@ -521,16 +806,22 @@ cmd_pick() {
 }
 
 usage() {
-  sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
   ""|-\?)            cmd_pick "" ;;
   scan)              shift; cmd_scan "$@" ;;
+  ignore|delete|rm)  shift; cmd_ignore "$@" ;;
   list|ls)           cmd_list ;;
   choose)            run_picker "${2:-}" ;;      # print an alias, don't connect
+  __rmalias)         shift; names=""             # internal: delete managed stanzas
+                     for a in "$@"; do names="$names
+$a"; done
+                     remove_managed_aliases "$names" ;;
   __preview)         cmd_preview "${2:-}" ;;     # internal: fzf preview pane
   __lines)           picker_lines ;;             # internal: what fzf is fed
+  __scanmenu)        scan_menu ;;                # internal: scan picker's fzf input
   __candidates)      scan_history ;;             # internal: raw history scan
   edit)              exec "${EDITOR:-vi}" "$CONFIG" ;;
   help|-h|--help)    usage ;;

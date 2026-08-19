@@ -365,6 +365,151 @@ else
 fi
 
 # --------------------------------------------------------------------------
+section "ignore list"
+
+H="$(newhome ign)"
+cat > "$H/.zsh_history" <<'EOF'
+: 1:0;ssh root@203.0.113.9
+: 2:0;ssh deploy@web1.example.com
+: 3:0;ssh root@198.51.100.5
+: 4:0;ssh admin@db.staging.acme.tld
+: 5:0;ssh admin@app.staging.acme.tld
+: 6:0;ssh luca@keep.example.com
+EOF
+
+out="$(run "$H" scan -n)"
+assert_has "before ignoring, everything is offered" "203.0.113.9" "$out"
+
+run "$H" ignore 'root@*' '*.staging.acme.tld' >/dev/null
+out="$(run "$H" scan -n)"
+assert_lacks "a user glob hides matching candidates"  "203.0.113.9"    "$out"
+assert_lacks "the second match of that glob is gone"  "198.51.100.5"   "$out"
+assert_lacks "a host glob hides a whole domain"       "staging.acme"   "$out"
+assert_has   "unrelated candidates are untouched"     "keep.example.com" "$out"
+assert_has   "it says how many it hid"                "hidden by"      "$out"
+
+perm="$(ls -l "$H/.ssh/sshui-ignore" | cut -c1-10)"
+assert_eq "the ignore file is mode 600" "-rw-------" "$perm"
+
+out="$(run "$H" ignore --list)"
+assert_has "--list shows the entries" "root@*" "$out"
+
+out="$(run "$H" ignore 'root@*')"
+assert_has "adding an existing pattern is a no-op" "already ignored" "$out"
+
+run "$H" ignore --remove 'root@*' >/dev/null
+out="$(run "$H" scan -n)"
+assert_has   "--remove brings candidates back"   "203.0.113.9"  "$out"
+assert_lacks "and leaves the other entry alone"  "staging.acme" "$out"
+
+# comments and blank lines must not match anything
+H="$(newhome ign2)"
+printf ': 1:0;ssh a@only.example.com\n' > "$H/.zsh_history"
+printf '# a comment\n\n   \n# root@*\n' > "$H/.ssh/sshui-ignore"
+out="$(run "$H" scan -n)"
+assert_has "comments and blank lines are not patterns" "only.example.com" "$out"
+
+printf 'a@only.example.com   # trailing comment\n' >> "$H/.ssh/sshui-ignore"
+out="$(run "$H" scan -n)"
+assert_lacks "an entry with a trailing comment still matches" "only.example.com" "$out"
+
+# --------------------------------------------------------------------------
+section "scan picker: dismissing rows"
+
+H="$(newhome scanmenu)"
+cat > "$H/.zsh_history" <<'EOF'
+: 1:0;ssh root@203.0.113.9
+: 2:0;ssh root@203.0.113.9
+: 3:0;ssh deploy@web1.example.com
+: 4:0;ssh junk@decommissioned.example.com
+EOF
+printf 'kh.example.com ssh-ed25519 AAAAC3Nz\n' > "$H/.ssh/known_hosts"
+
+menu="$(run "$H" __scanmenu)"
+n="$(printf '%s\n' "$menu" | awk -F'\t' 'NF != 3' | wc -l | tr -d ' ')"
+assert_eq "every menu line has three columns" "0" "$n"
+
+# column 2 is what import consumes, column 3 is what ctrl-x hands to `ignore`
+row="$(printf '%s\n' "$menu" | grep decommissioned)"
+assert_has "column 1 is the display text" "junk@decommissioned.example.com" "$(printf '%s' "$row" | cut -f1)"
+assert_has "column 2 is the raw record"   "junk|decommissioned.example.com" "$(printf '%s' "$row" | cut -f2)"
+assert_eq  "column 3 is the ignore pattern" "junk@decommissioned.example.com" "$(printf '%s' "$row" | cut -f3)"
+
+# a known_hosts row has no username, so its pattern is the bare host
+row="$(printf '%s\n' "$menu" | grep kh.example.com)"
+assert_eq "a username-less row yields a bare-host pattern" "kh.example.com" "$(printf '%s' "$row" | cut -f3)"
+
+# what ctrl-x actually runs: `sshui ignore <column 3>`, then reload
+pat="$(printf '%s\n' "$menu" | grep decommissioned | cut -f3)"
+run "$H" ignore "$pat" >/dev/null
+menu2="$(run "$H" __scanmenu)"
+assert_lacks "the dismissed row is gone after reload" "decommissioned" "$menu2"
+assert_has   "the other rows survive"                 "web1.example.com" "$menu2"
+assert_has   "and it stays gone in later scans"       "hidden by"        "$(run "$H" scan -n)"
+
+# multi-select: ctrl-x passes several patterns at once ({+3})
+H="$(newhome scanmenu2)"
+printf ': 1:0;ssh a@one.example.com\n: 2:0;ssh b@two.example.com\n: 3:0;ssh c@three.example.com\n' \
+  > "$H/.zsh_history"
+pats="$(run "$H" __scanmenu | cut -f3 | grep -E 'one|two')"
+# shellcheck disable=SC2046  # deliberate splitting: several patterns, as fzf's {+3} passes them
+run "$H" ignore $(printf '%s ' $pats) >/dev/null
+menu="$(run "$H" __scanmenu)"
+assert_lacks "multi-select dismisses the first"  "one.example.com"   "$menu"
+assert_lacks "multi-select dismisses the second" "two.example.com"   "$menu"
+assert_has   "and leaves the rest"               "three.example.com" "$menu"
+
+# dismissing must not import anything
+assert_has "nothing was written to the config" "No hosts in" "$(run "$H" list)"
+
+# --------------------------------------------------------------------------
+section "deleting managed stanzas"
+
+H="$(newhome del)"
+printf 'Host handwritten\n    HostName hand.example.com\n    User luca\n' > "$H/.ssh/config"
+printf ': 1:0;ssh a@one.example.com\n: 2:0;ssh b@two.example.com\n' > "$H/.zsh_history"
+import_all "$H" >/dev/null
+
+out="$(run "$H" list)"
+assert_has "imported both" "one" "$out"
+
+run "$H" __rmalias two >/dev/null
+out="$(run "$H" list)"
+assert_lacks "deletes the named stanza"          "two"         "$out"
+assert_has   "leaves the other import alone"     "one"         "$out"
+assert_has   "leaves hand-written stanzas alone" "handwritten" "$out"
+
+# refuses to touch anything outside the managed block
+run "$H" __rmalias handwritten >/dev/null
+assert_has "will not delete a stanza outside the managed block" "handwritten" "$(run "$H" list)"
+
+# a Host line with several patterns loses only the named one
+H="$(newhome del2)"
+cat > "$H/.ssh/config" <<'EOF'
+# >>> sshui managed hosts >>>
+Host alpha beta
+    HostName ab.example.com
+    User x
+
+Host gamma
+    HostName g.example.com
+# <<< sshui managed hosts <<<
+EOF
+run "$H" __rmalias alpha >/dev/null
+out="$(run "$H" list)"
+assert_lacks "drops the named pattern from a multi-alias Host" "alpha" "$out"
+assert_has   "the sibling alias survives"                      "beta"  "$out"
+assert_has   "and so does its target"                          "x@ab.example.com" "$out"
+run "$H" __rmalias beta >/dev/null
+out="$(run "$H" list)"
+assert_lacks "removing the last pattern drops the stanza" "ab.example.com" "$out"
+assert_has   "other stanzas are unaffected"              "gamma"          "$out"
+
+# deletion goes through the same safety path as import
+n="$(count_backups "$H/.ssh")"
+if [ "$n" -ge 1 ]; then ok "deletion writes a backup too"; else no "deletion writes a backup too"; fi
+
+# --------------------------------------------------------------------------
 section "picker plumbing"
 
 H="$(newhome pick)"
