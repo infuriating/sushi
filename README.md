@@ -98,7 +98,11 @@ that file. The ignore list itself is written once, after the picker closes, howe
 dismissed. Doing the obvious thing instead — write the ignore file, then reload by re-scanning —
 cost ~900ms per keypress on a 3000-line history; this is ~30ms.
 
-`sushi delete` is the standalone version, and its picker offers two kinds of entry:
+`sushi delete` is the standalone version. It only ever offers things you haven't dealt with —
+anything already on the ignore list is left out, since re-offering it in the picker you dismissed it
+from is just noise. Use `--list` and `--remove` to see and undo the list itself.
+
+Its picker offers two kinds of entry:
 
 - **`scan`** — a candidate that hasn't been imported. Selecting it adds a pattern to the ignore
   list so it's never offered again.

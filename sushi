@@ -763,6 +763,10 @@ ignore_rows() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     IFS="$SEP" read -r count user host port <<< "$line"
+    # Already dismissed: offering it again in the very picker you dismissed it
+    # from is just noise. `sushi ignore --list` and `--remove` are where the
+    # ignore list itself is visible.
+    is_ignored "$user" "$host" && continue
     target="${user:+$user@}$host"
     printf '%s%-9s%s %s%-42s%s %s\n' \
       "$C_CYAN" 'scan' "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$target"
@@ -858,7 +862,9 @@ EOF
   rows="$(ignore_rows)"
 
   if [ -z "$rows" ]; then
-    printf 'Nothing to ignore: no scan candidates and no sushi-managed hosts.\n'
+    printf 'Nothing to ignore: no new scan candidates and no sushi-managed hosts.\n'
+    [ -s "$IGNORE" ] && \
+      printf '(anything already dismissed lives in %s — see: sushi ignore --list)\n' "$IGNORE"
     return 0
   fi
 

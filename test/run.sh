@@ -698,6 +698,32 @@ assert_eq "one row per managed pattern" "3" "$n"
 last="$(printf '%s\n' "$rows" | grep 'imported' | grep 'alpha' | awk '{ print $NF }')"
 assert_eq "the imported payload is the bare alias" "alpha" "$last"
 
+# already-dismissed candidates must not come back in the picker you dismissed
+# them from — `--list` and `--remove` are where the ignore list is visible
+run "$H" ignore 'new@fresh.example.com' > /dev/null
+rows="$(run "$H" __ignoremenu)"
+assert_lacks "an ignored candidate is not offered again" "fresh.example.com" "$rows"
+assert_has   "imported hosts are still offered"          "imported"          "$rows"
+assert_has   "and it is still listed as ignored"         "fresh.example.com" \
+             "$(run "$H" ignore --list)"
+
+# a glob hides everything it matches, not just an exact entry
+H="$(newhome ignrows2)"
+printf ': 1:0;ssh root@a.example.com\n: 2:0;ssh root@b.example.com\n: 3:0;ssh me@c.example.com\n' \
+  > "$H/.zsh_history"
+run "$H" ignore 'root@*' > /dev/null
+rows="$(run "$H" __ignoremenu)"
+assert_lacks "a glob hides the first match"  "a.example.com" "$rows"
+assert_lacks "and the second"                "b.example.com" "$rows"
+assert_has   "leaving the rest"              "c.example.com" "$rows"
+
+# with everything dismissed and nothing imported, say so and point at the list
+run "$H" ignore 'me@c.example.com' > /dev/null
+out="$(run "$H" ignore)"
+assert_has "reports having nothing left to offer" "Nothing to ignore" "$out"
+assert_has "and points at the ignore list"        "already dismissed" "$out"
+
+
 # --------------------------------------------------------------------------
 section "theme"
 
