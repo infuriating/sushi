@@ -148,7 +148,8 @@ if command -v zsh >/dev/null 2>&1; then
     *,enter,*) check="bindkey '^M' | grep -q sushi-accept-line"; what="ENTER on a bare \`ssh\` opens the picker" ;;
     *)         check="true"; what="the sushi command is available" ;;
   esac
-  if SUSHI_MODE="$MODE" SUSHI_KEY="$KEY" zsh -ic "$probe; $check" 2>/dev/null; then
+  if SUSHI_MODE="$MODE" SUSHI_KEY="$KEY" SHELL_SESSIONS_DISABLE=1 \
+     zsh -ic "SAVEHIST=0; $probe; $check" 2>/dev/null; then
     info "verified:    $what"
   else
     warn "could not verify the integration loaded — try:  zsh -ic 'source $HERE/sushi.zsh; bindkey $KEY'"

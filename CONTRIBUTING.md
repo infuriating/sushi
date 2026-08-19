@@ -15,8 +15,26 @@ Both must be clean. CI runs the same two things on Linux and macOS.
 ## Ground rules
 
 **Portability.** macOS ships bash 3.2 and BSD userland. That rules out `mapfile`, `declare -A`,
-`${var,,}`, `sed -i` without an argument, GNU-only flags, and `\x` escapes in `awk`. If you are
-unsure, the macOS CI job will tell you.
+`${var,,}`, `sed -i` without an argument, GNU-only flags, and `\x` escapes in `awk`.
+
+macOS's `/usr/bin/awk` is onetrueawk, not gawk, and two of its limits have bitten this project:
+
+- **`awk -v` cannot take a value containing a newline.** It fails with "newline in string" and the
+  program never runs — so you get empty output, not an error you'd notice. Never pass a multi-line
+  list through `-v`: stream it in on stdin behind a marker line, or read it from a file in `BEGIN`
+  with `getline < file`.
+- **POSIX character classes** like `[[:space:]]` are unsupported in older builds. Use `[ \t]` in awk
+  programs. (`sed` and bash `[[ =~ ]]` are fine with them on both platforms.)
+
+`apt-get install original-awk` gets you the same implementation, and the suite runs the
+awk-sensitive paths against it when present — so the Linux job catches this class of bug. The macOS
+job is still the final word on bash 3.2 and BSD tools.
+
+**Keep the tests hermetic.** The zsh probes run with `SAVEHIST=0` and `SHELL_SESSIONS_DISABLE=1`.
+Without them, macOS's `/etc/zshrc` writes each probe's commands into the fake `$HOME`'s
+`.zsh_history` and `.zsh_sessions/*.history` — both of which sushi scans — so probes contaminated
+each other's fixtures. `_sushi_dispatch` in particular pushes `ssh <host>` into the shell history by
+design, which then reappeared as a scan candidate.
 
 **Never lose the user's config.** Any change to the write path has to keep these properties, each
 of which has a test:

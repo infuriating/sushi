@@ -79,7 +79,7 @@ config_hosts() {
       n = 0; hostname = ""; user = ""; port = ""
     }
     BEGIN { n = 0 }
-    /^[[:space:]]*#/ { next }
+    /^[ \t]*#/ { next }
     NF == 0 { next }
     { k = tolower($1); sub(/=$/, "", k) }
     k == "host"     { flush(); for (i = 2; i <= NF; i++) pat[++n] = $i; next }
@@ -327,15 +327,18 @@ install_block() {
 # several patterns loses only the named ones; it survives if any remain.
 # $1 = newline-separated alias names
 remove_managed_aliases() {
-  local names="$1" body
+  local names="$1" body flat
   body="$(mktemp "${TMPDIR:-/tmp}/sushi-body.XXXXXX")" || die "mktemp failed"
-  managed_block | awk -v names="$names" '
-    BEGIN { n = split(names, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") kill[a[i]] = 1 }
+  # Space-separated on ONE line: onetrueawk (macOS) refuses a -v value with a
+  # newline in it, and Host patterns cannot contain whitespace anyway.
+  flat="$(printf '%s\n' "$names" | tr '\n' ' ')"
+  managed_block | awk -v names="$flat" '
+    BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") kill[a[i]] = 1 }
     {
       line = $0
-      sub(/^[[:space:]]+/, "", line)
-      if (tolower(line) ~ /^host[[:space:]]/) {
-        split(line, f, /[[:space:]]+/)
+      sub(/^[ \t]+/, "", line)
+      if (tolower(line) ~ /^host[ \t]/) {
+        split(line, f, "[ \t]+")
         keep = ""
         for (i = 2; i in f; i++) if (f[i] != "" && !(f[i] in kill)) keep = keep " " f[i]
         if (keep == "") { skip = 1; next }
@@ -428,7 +431,7 @@ ignore_remove() {
   for pat in "$@"; do
     [ -n "$pat" ] || continue
     awk -v p="$pat" '
-      { line = $0; sub(/#.*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line) }
+      { line = $0; sub(/#.*/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
       line == p { next }
       { print }' "$tmp" > "$tmp.new" && mv "$tmp.new" "$tmp"
     printf '  no longer ignoring: %s\n' "$pat"
@@ -444,29 +447,33 @@ ignore_remove() {
 # list is NOT applied here — callers filter, because this runs in a subshell
 # (process substitution) and a count set in here would never reach the caller.
 scan_candidates() {
-  local cfg
-  cfg="$(config_hosts)"
-  # One awk for all of it. This used to be two bash loops calling tr and
-  # `grep -Fxq` per candidate — six subprocesses a row, which dominated the
-  # scan picker's reload time.
-  { scan_history; printf '%s\n' '@@SUSHI_KNOWN_HOSTS@@'; scan_known_hosts; } \
-    | awk -v cfg="$cfg" '
+  # Three streams into one awk, separated by markers. The ssh config used to
+  # arrive via `awk -v cfg="$cfg"`, but onetrueawk — which is what macOS ships —
+  # rejects a -v value containing a newline ("newline in string"), so the whole
+  # program silently never ran and scan found nothing whenever the config held
+  # more than one host. Nothing multi-line goes through -v anywhere now.
+  {
+    config_hosts
+    printf '%s\n' '@@SUSHI_HISTORY@@'
+    scan_history
+    printf '%s\n' '@@SUSHI_KNOWN_HOSTS@@'
+    scan_known_hosts
+  } | awk '
       function boring(h) {
         return (h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0")
       }
-      BEGIN {
-        FS = "|"
-        n = split(cfg, L, "\n")
-        for (i = 1; i <= n; i++) {
-          if (L[i] == "") continue
-          split(L[i], f, "\t")
-          alias[tolower(f[1])] = 1
-          name[tolower(f[2])] = 1
-          pair[tolower(f[2]) SUBSEP tolower(f[3])] = 1
-        }
-        mode = 1
-      }
+      BEGIN { FS = "|"; mode = 0 }
+      $0 == "@@SUSHI_HISTORY@@"     { mode = 1; next }
       $0 == "@@SUSHI_KNOWN_HOSTS@@" { mode = 2; next }
+      # the ssh config: alias \t hostname \t user \t port
+      mode == 0 {
+        split($0, f, "\t")
+        if (f[1] == "") next
+        alias[tolower(f[1])] = 1
+        name[tolower(f[2])] = 1
+        pair[tolower(f[2]) SUBSEP tolower(f[3])] = 1
+        next
+      }
       mode == 1 {
         user = $2; host = $3
         if (host == "") next
@@ -748,8 +755,8 @@ EOF
   done < <(scan_candidates)
 
   local managed
-  managed="$(managed_block | awk '{ l = $0; sub(/^[[:space:]]+/, "", l)
-    if (tolower(l) ~ /^host[[:space:]]/) { for (i = 2; i <= NF; i++) print $i } }')"
+  managed="$(managed_block | awk '{ l = $0; sub(/^[ \t]+/, "", l)
+    if (tolower(l) ~ /^host[ \t]/) { for (i = 2; i <= NF; i++) print $i } }')"
 
   local alias_ tgt
   while IFS= read -r alias_; do
@@ -867,13 +874,15 @@ picker_lines() {
 # the ctrl-e / ctrl-r side trips send their output to stderr for the same reason.
 # Returns 1 when nothing was chosen.
 run_picker() {
-  have fzf || { warn "fzf not found. Install it (brew install fzf) or use: sushi list"; return 1; }
+  # "nothing to pick from" before "install fzf": with an empty config the first
+  # is the actionable message, and fzf would have nothing to show either way.
   local lines out key rec
   lines="$(picker_lines)"
   if [ -z "$lines" ]; then
     warn "no hosts in $CONFIG yet — run: sushi scan"
     return 1
   fi
+  have fzf || { warn "fzf not found. Install it (brew install fzf) or use: sushi list"; return 1; }
 
   out="$(printf '%s\n' "$lines" \
     | fzf --delimiter='\t' --with-nth=1 --height=80% --reverse --border \

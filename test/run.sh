@@ -565,6 +565,68 @@ n="$(count_backups "$H/.ssh")"
 if [ "$n" -ge 1 ]; then ok "deletion writes a backup too"; else no "deletion writes a backup too"; fi
 
 # --------------------------------------------------------------------------
+section "portability: onetrueawk (what macOS ships)"
+
+# macOS's /usr/bin/awk is onetrueawk, not gawk. It refuses a -v assignment whose
+# value contains a newline ("newline in string") — the program then never runs at
+# all. That silently emptied the managed block on delete, and made scan find
+# nothing whenever ~/.ssh/config held more than one host. Both were invisible on
+# Linux CI, so run the awk-sensitive paths against onetrueawk where it exists.
+#
+# Debian/Ubuntu: apt-get install original-awk
+if command -v original-awk >/dev/null 2>&1; then
+  SHIM="$WORK/awkshim"
+  mkdir -p "$SHIM"
+  ln -sf "$(command -v original-awk)" "$SHIM/awk"
+
+  oldawk() { PATH="$SHIM:$PATH" HOME="$1" "$SUSHI" "${@:2}" 2>&1; }
+
+  H="$(newhome otawk)"
+  cat > "$H/.ssh/config" <<'EOF'
+# >>> sushi managed hosts >>>
+Host alpha beta
+    HostName ab.example.com
+    User x
+
+Host gamma
+    HostName g.example.com
+    User y
+# <<< sushi managed hosts <<<
+
+Host handwritten
+    HostName hand.example.com
+EOF
+  printf ': 1:0;ssh new@fresh.example.com\n: 2:0;ssh y@g.example.com\n' > "$H/.zsh_history"
+
+  out="$(oldawk "$H" list)"
+  assert_has "reads a multi-host config"    "alpha" "$out"
+  assert_has "including the last stanza"    "gamma" "$out"
+  assert_has "and hand-written ones"        "handwritten" "$out"
+
+  # a multi-line config used to go through `awk -v cfg=...` and kill the program
+  out="$(oldawk "$H" scan -n)"
+  assert_has   "scan still finds new hosts"          "fresh.example.com" "$out"
+  assert_lacks "and still skips already-configured"  "g.example.com"     "$out"
+
+  # deletion used to empty the whole managed block
+  oldawk "$H" __rmalias alpha > /dev/null
+  out="$(oldawk "$H" list)"
+  assert_lacks "delete drops only the named pattern" "alpha" "$out"
+  assert_has   "the sibling alias survives"          "beta"  "$out"
+  assert_has   "other managed stanzas survive"       "gamma" "$out"
+  assert_has   "hand-written stanzas survive"        "handwritten" "$out"
+
+  # the ignore list and the picker feed
+  oldawk "$H" ignore 'root@*' > /dev/null
+  assert_has "the ignore list round-trips" "root@*" "$(oldawk "$H" ignore --list)"
+  n="$(oldawk "$H" __lines | wc -l | tr -d ' ')"
+  assert_eq "the picker lists the three survivors" "3" "$n"
+  assert_has "the preview renders" "ab.example.com" "$(oldawk "$H" __preview beta)"
+else
+  skip "onetrueawk portability" "original-awk not installed"
+fi
+
+# --------------------------------------------------------------------------
 section "picker plumbing"
 
 H="$(newhome pick)"
@@ -618,14 +680,19 @@ if command -v zsh >/dev/null 2>&1; then
   Z="$ROOT/sushi.zsh"
 
   # zprobe <mode> <zsh snippet> -> last line of output
+  # SAVEHIST=0: macOS ships an /etc/zshrc that sets HISTFILE, so every probe
+  # would otherwise append its own commands to the fake home's .zsh_history —
+  # including the "ssh myhost" that _sushi_dispatch pushes with `print -s`, which
+  # then showed up as a scan candidate and broke unrelated assertions.
   zprobe() {
-    HOME="$H" zsh -ic "SUSHI_MODE='$1'; source '$Z'; $2" 2>&1 | tail -1
+    HOME="$H" SHELL_SESSIONS_DISABLE=1 \
+      zsh -ic "SAVEHIST=0; SUSHI_MODE='$1'; source '$Z'; $2" 2>&1 | tail -1
   }
 
   assert_eq "engine is found next to sushi.zsh"  "$SUSHI" "$(zprobe key 'echo $SUSHI_BIN')"
   assert_has "sushi works as a shell function, off PATH" "zhost" "$(zprobe key 'sushi list')"
 
-  out="$(HOME="$H" zsh -ic "source '$Z'; echo \$SUSHI_MODE" 2>&1 | tail -1)"
+  out="$(HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; source '$Z'; echo \$SUSHI_MODE" 2>&1 | tail -1)"
   assert_eq "default mode does not shadow ssh" "key,enter" "$out"
 
   out="$(HOME="$H" zsh -c "SUSHI_MODE=wrap; source '$Z'; whence -w ssh" 2>&1 | tail -1)"
@@ -642,13 +709,13 @@ if command -v zsh >/dev/null 2>&1; then
   printf '#!/bin/sh\necho "STUBSSH $*"\n' > "$STUB/ssh"
   chmod +x "$STUB/ssh"
 
-  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sushi_dispatch myhost" 2>&1)"
+  out="$(HOME="$H" PATH="$STUB:$PATH" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SAVEHIST=0; source '$Z'; _sushi_dispatch myhost" 2>&1)"
   assert_lacks "by default the function does not connect itself" "STUBSSH" "$out"
 
-  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "SUSHI_EXEC=1; source '$Z'; _sushi_dispatch myhost" 2>&1)"
+  out="$(HOME="$H" PATH="$STUB:$PATH" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SUSHI_EXEC=1; source '$Z'; _sushi_dispatch myhost" 2>&1)"
   assert_has "SUSHI_EXEC=1 connects immediately instead" "STUBSSH myhost" "$out"
 
-  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sushi_dispatch ''" 2>&1)"
+  out="$(HOME="$H" PATH="$STUB:$PATH" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SAVEHIST=0; source '$Z'; _sushi_dispatch ''" 2>&1)"
   assert_lacks "an empty pick is a no-op" "STUBSSH" "$out"
 
   assert_eq "SUSHI_EXEC defaults to off" "0" "$(zprobe key 'print $SUSHI_EXEC')"
@@ -672,7 +739,7 @@ if command -v zsh >/dev/null 2>&1; then
              "$(zprobe key 'sushi ignore --list 2>&1 | head -1')"
   # a bare unknown word must go to the picker, not be taken for a subcommand
   # (empty config, so the picker bails before it would reach for fzf)
-  out="$(HOME="$H" zsh -ic "SUSHI_MODE=key; export SUSHI_CONFIG=$WORK/none.conf; source '$Z'
+  out="$(HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SUSHI_MODE=key; export SUSHI_CONFIG=$WORK/none.conf; source '$Z'
     sushi somethingunmatched 2>&1 | head -1" 2>&1 | tail -1)"
   assert_has "a bare unknown word is still a picker query" "no hosts in" "$out"
   assert_has "the dispatcher exists even in off mode" "0" "$(zprobe off 'print $SUSHI_EXEC')"
@@ -681,14 +748,14 @@ if command -v zsh >/dev/null 2>&1; then
   assert_eq "leaves ssh a real command"  "ssh: command"       "$(zprobe key 'whence -w ssh')"
   assert_has "binds the key"             "sushi-insert-host"  "$(zprobe key "bindkey '^S'")"
   assert_lacks "does not touch accept-line" "sushi-accept-line" "$(zprobe key 'zle -l | grep accept-line')"
-  out="$(HOME="$H" zsh -ic "SUSHI_MODE=key; SUSHI_KEY='^G'; source '$Z'; bindkey '^G'" 2>&1 | tail -1)"
+  out="$(HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SUSHI_MODE=key; SUSHI_KEY='^G'; source '$Z'; bindkey '^G'" 2>&1 | tail -1)"
   assert_has "honours a custom SUSHI_KEY" "sushi-insert-host" "$out"
 
   section "zsh integration: mode enter"
   assert_eq "leaves ssh a real command"  "ssh: command"  "$(zprobe enter 'whence -w ssh')"
   assert_has "binds the RETURN key"      "sushi-accept-line" "$(zprobe enter "bindkey '^M'")"
   assert_lacks "does not bind ^S"        "sushi-insert-host" "$(zprobe enter "bindkey '^S'")"
-  out="$(HOME="$H" zsh -ic "SUSHI_MODE=enter; SUSHI_RETURN='^J'; source '$Z'; bindkey '^J'" 2>&1 | tail -1)"
+  out="$(HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SUSHI_MODE=enter; SUSHI_RETURN='^J'; source '$Z'; bindkey '^J'" 2>&1 | tail -1)"
   assert_has "honours a custom SUSHI_RETURN" "sushi-accept-line" "$out"
 
   # It must NOT take ownership of the accept-line widget: zsh-autosuggestions,
@@ -717,7 +784,7 @@ PLUGIN
 
   for ord in "'$Z' '$FAKE'" "'$FAKE' '$Z'"; do
     label="$([ "${ord#\'$Z\'}" != "$ord" ] && echo "sushi first" || echo "plugin first")"
-    out="$(HOME="$H" zsh -ic "SUSHI_MODE=enter; source ${ord% *}; source ${ord#* }
+    out="$(HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SUSHI_MODE=enter; source ${ord% *}; source ${ord#* }
       print -r -- \"W=\$widgets[accept-line] K=\$(bindkey '^M')\"" 2>&1 | tail -1)"
     assert_has "$label: the plugin keeps accept-line" "_fakesuggest_bound_accept-line" "$out"
     assert_has "$label: sushi still owns RETURN"      "sushi-accept-line"              "$out"
@@ -726,7 +793,7 @@ PLUGIN
   # Re-sourcing must be a no-op. `source ~/.zshrc` to reload is the documented
   # advice for terminals where `exec zsh` throws away their shell integration,
   # so sourcing twice — with a widget-wrapping plugin in between — has to be safe.
-  out="$(HOME="$H" zsh -ic "SUSHI_MODE=key,enter
+  out="$(HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0; SUSHI_MODE=key,enter
     source '$Z'; source '$FAKE'; source '$Z'; source '$Z'
     print -r -- \"W=\$widgets[accept-line] M=\$(bindkey '^M') S=\$(bindkey '^S')\"" 2>&1 | tail -1)"
   assert_has   "re-sourcing leaves accept-line with the plugin" "_fakesuggest_bound_accept-line" "$out"
@@ -782,11 +849,11 @@ assert_has "honours --key" "SUSHI_KEY:='^G'" "$(cat "$IH/.zshrc")"
 # `SUSHI_MODE=off zsh -i` gives you a throwaway shell with sushi disabled
 if command -v zsh >/dev/null 2>&1; then
   HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --mode=enter >/dev/null 2>&1
-  out="$(HOME="$IH" zsh -ic 'print $SUSHI_MODE' 2>/dev/null | tail -1)"
+  out="$(HOME="$IH" SHELL_SESSIONS_DISABLE=1 zsh -ic 'SAVEHIST=0; print $SUSHI_MODE' 2>/dev/null | tail -1)"
   assert_eq "the .zshrc block applies its mode"  "enter" "$out"
-  out="$(HOME="$IH" SUSHI_MODE=off zsh -ic 'print $SUSHI_MODE' 2>/dev/null | tail -1)"
+  out="$(HOME="$IH" SUSHI_MODE=off SHELL_SESSIONS_DISABLE=1 zsh -ic 'SAVEHIST=0; SAVEHIST=0; print $SUSHI_MODE' 2>/dev/null | tail -1)"
   assert_eq "an exported SUSHI_MODE overrides it" "off" "$out"
-  out="$(HOME="$IH" SUSHI_MODE=wrap zsh -ic 'whence -w ssh' 2>/dev/null | tail -1)"
+  out="$(HOME="$IH" SUSHI_MODE=wrap SHELL_SESSIONS_DISABLE=1 zsh -ic 'SAVEHIST=0; whence -w ssh' 2>/dev/null | tail -1)"
   assert_eq "and the override actually takes effect" "ssh: function" "$out"
 fi
 
