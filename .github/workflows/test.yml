@@ -1,0 +1,53 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos exercises bash 3.2 + BSD userland, which is what most users have
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck zsh openssh-client
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
+      - name: Report shell versions
+        run: |
+          bash --version | head -1
+          zsh --version
+          ssh -V
+
+      - name: shellcheck
+        run: shellcheck -S warning sshui install.sh test/run.sh
+
+      - name: tests
+        run: ./test/run.sh -v
+
+      - name: install.sh is idempotent and reversible
+        run: |
+          export HOME="$(mktemp -d)"
+          mkdir -p "$HOME/.ssh"
+          printf '# pre-existing\nexport KEEP=1\n' > "$HOME/.zshrc"
+          ./install.sh
+          ./install.sh
+          test "$(grep -c 'sshui.zsh' "$HOME/.zshrc")" -eq 1
+          ./install.sh --uninstall
+          grep -q 'export KEEP=1' "$HOME/.zshrc"
+          ! grep -q 'sshui' "$HOME/.zshrc"

@@ -1,0 +1,4 @@
+.DS_Store
+*.sshui-backup-*
+*.sshui-backup
+*.tmp

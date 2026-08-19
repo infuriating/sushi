@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+#
+# sshui test suite. No fzf and no terminal required.
+#
+#   test/run.sh              run everything
+#   test/run.sh -v           show every assertion, not just failures
+#
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SSHUI="$ROOT/sshui"
+VERBOSE=0
+[ "${1:-}" = "-v" ] && VERBOSE=1
+
+PASS=0; FAIL=0; SKIP=0
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/sshui-test.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+red()   { printf '\033[31m%s\033[0m' "$1"; }
+green() { printf '\033[32m%s\033[0m' "$1"; }
+dim()   { printf '\033[2m%s\033[0m' "$1"; }
+
+ok()   { PASS=$((PASS + 1)); [ "$VERBOSE" = 1 ] && { green "  ok  "; printf '%s\n' "$1"; }; return 0; }
+no()   { FAIL=$((FAIL + 1)); red "  FAIL"; printf ' %s\n' "$1"; return 0; }
+skip() { SKIP=$((SKIP + 1)); dim "  skip"; printf ' %s (%s)\n' "$1" "$2"; return 0; }
+
+section() { printf '\n%s\n' "$1"; }
+
+# assert_eq <label> <expected> <actual>
+assert_eq() {
+  if [ "$2" = "$3" ]; then ok "$1"; else
+    no "$1"
+    printf '        expected: %s\n' "$(printf '%s' "$2" | head -20)"
+    printf '        actual:   %s\n' "$(printf '%s' "$3" | head -20)"
+  fi
+}
+
+# assert_has <label> <needle> <haystack>
+assert_has() {
+  case "$3" in
+    *"$2"*) ok "$1" ;;
+    *) no "$1"; printf '        missing %s in:\n%s\n' "$2" "$(printf '%s' "$3" | sed 's/^/          /' | head -20)" ;;
+  esac
+}
+
+# assert_lacks <label> <needle> <haystack>
+assert_lacks() {
+  case "$3" in
+    *"$2"*) no "$1"; printf '        unexpectedly found %s\n' "$2" ;;
+    *) ok "$1" ;;
+  esac
+}
+
+# newhome <name> -> echoes a fresh fake $HOME
+newhome() {
+  local h="$WORK/$1"
+  rm -rf "$h"; mkdir -p "$h/.ssh"
+  printf '%s' "$h"
+}
+
+# count backup files without piping ls through grep
+count_backups() {
+  local f n=0
+  for f in "$1"/config.sshui-backup-*; do
+    [ -e "$f" ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+# run sshui with a given fake home
+run() {
+  local h="$1"; shift
+  HOME="$h" "$SSHUI" "$@" 2>&1
+}
+
+# import everything sshui finds, non-interactively
+import_all() {
+  local h="$1"
+  printf 'w\n' | HOME="$h" SSHUI_ALL=1 "$SSHUI" scan 2>&1
+}
+
+# --------------------------------------------------------------------------
+section "static checks"
+
+if bash -n "$SSHUI" 2>/dev/null; then ok "sshui parses under bash"; else no "sshui parses under bash"; fi
+
+if command -v zsh >/dev/null 2>&1; then
+  if zsh -n "$ROOT/sshui.zsh" 2>/dev/null; then ok "sshui.zsh parses under zsh"; else no "sshui.zsh parses under zsh"; fi
+else
+  skip "sshui.zsh parses under zsh" "zsh not installed"
+fi
+
+if command -v shellcheck >/dev/null 2>&1; then
+  out="$(shellcheck -S warning "$SSHUI" 2>&1)"
+  assert_eq "shellcheck clean at warning level" "" "$out"
+else
+  skip "shellcheck" "not installed"
+fi
+
+# --------------------------------------------------------------------------
+section "ssh_config parsing"
+
+H="$(newhome cfg)"
+cat > "$H/.ssh/config" <<'EOF'
+Host *
+    ServerAliveInterval 60
+
+Include conf.d/*.conf
+
+Host prod-web
+    HostName 10.20.30.40
+    User deploy
+    Port 2222
+
+Host bastion legacy-jump
+    HostName jump.example.com
+    User luca
+
+Host wild-*
+    User nobody
+EOF
+mkdir -p "$H/.ssh/conf.d"
+printf 'Host from-include\n    HostName inc.example.com\n    User git\n' > "$H/.ssh/conf.d/w.conf"
+
+out="$(run "$H" list)"
+assert_has   "reads a plain stanza"                 "prod-web" "$out"
+assert_has   "keeps a non-default port"             "deploy@10.20.30.40:2222" "$out"
+assert_has   "expands Include"                      "from-include" "$out"
+assert_has   "first alias of a multi-pattern Host"  "bastion" "$out"
+assert_has   "second alias of a multi-pattern Host" "legacy-jump" "$out"
+assert_lacks "skips the Host * catch-all"           "ServerAlive" "$out"
+assert_lacks "skips wildcard patterns"              "wild-" "$out"
+# careful: a naive ":22" search also matches ":2222"
+n="$(printf '%s\n' "$out" | grep -c ':22$' || true)"
+assert_eq "omits :22 for the default port" "0" "$n"
+
+# --------------------------------------------------------------------------
+section "history parsing"
+
+H="$(newhome hist)"
+cat > "$H/.zsh_history" <<'EOF'
+: 1:0;ssh root@203.0.113.9
+: 2:0;ssh root@203.0.113.9
+: 3:0;ssh -p 2022 deploy@staging.example.com
+: 4:0;ssh deploy@staging.example.com
+: 5:0;ssh other@late-flag.example.com -p 8022
+: 6:0;ssh -i ~/.ssh/id_ed25519 keyed@keys.example.com
+: 7:0;ssh -o StrictHostKeyChecking=no opt@opts.example.com
+: 8:0;ssh -J jumper@bastion.example.com deep@behind.example.com
+: 9:0;ssh -l flaguser flag-l.example.com
+: 10:0;ssh "quoted@quotes.example.com"
+: 11:0;cd /tmp && ssh chained@chain.example.com
+: 12:0;sudo ssh sudoer@sudo.example.com
+: 13:0;ssh nouser.example.com
+: 14:0;ssh UPPER.Example.COM
+: 15:0;echo "ssh is a great tool"
+: 16:0;# ssh commented@out.example.com
+: 17:0;ssh-keygen -t ed25519
+: 18:0;scp thing.txt scpuser@scp.example.com:/tmp/
+: 19:0;git push origin main
+: 20:0;ssh localhost
+EOF
+cand="$(run "$H" __candidates)"
+
+assert_has   "counts repeats"                    "2|root|203.0.113.9|"                    "$cand"
+assert_has   "-p before the host"                "|deploy|staging.example.com|2022"       "$cand"
+assert_has   "-p after the host"                 "1|other|late-flag.example.com|8022"     "$cand"
+assert_has   "skips -i and its argument"         "1|keyed|keys.example.com|"              "$cand"
+assert_has   "skips -o and its argument"         "1|opt|opts.example.com|"                "$cand"
+assert_has   "-J picks the real destination"     "1|deep|behind.example.com|"             "$cand"
+assert_lacks "-J does not yield the jump host"   "bastion.example.com"                    "$cand"
+assert_has   "-l supplies the username"          "1|flaguser|flag-l.example.com|"         "$cand"
+assert_has   "strips surrounding quotes"         "1|quoted|quotes.example.com|"           "$cand"
+assert_has   "finds ssh after &&"                "1|chained|chain.example.com|"           "$cand"
+assert_has   "finds ssh after sudo"              "1|sudoer|sudo.example.com|"             "$cand"
+assert_has   "host with no username"             "1||nouser.example.com|"                 "$cand"
+assert_has   "preserves hostname case"           "UPPER.Example.COM"                      "$cand"
+assert_lacks "ignores ssh inside a quoted string" "great"                                 "$cand"
+assert_lacks "ignores commented-out commands"    "out.example.com"                        "$cand"
+assert_lacks "ignores ssh-keygen"                "ed25519"                                "$cand"
+assert_lacks "ignores scp"                       "scp.example.com"                        "$cand"
+
+# the -p 2022 / no-port pair must collapse into one entry
+n="$(printf '%s\n' "$cand" | grep -c 'staging\.example\.com')"
+assert_eq "same host with and without a port collapses" "1" "$n"
+assert_has "the collapsed entry keeps the port" "2|deploy|staging.example.com|2022" "$cand"
+
+# --------------------------------------------------------------------------
+section "history parsing: other shells"
+
+H="$(newhome shells)"
+printf 'ssh bashuser@bash.example.com\n' > "$H/.bash_history"
+mkdir -p "$H/.local/share/fish"
+printf -- '- cmd: ssh fishuser@fish.example.com\n  when: 1\n' > "$H/.local/share/fish/fish_history"
+mkdir -p "$H/.zsh_sessions"
+printf 'ssh sessuser@session.example.com\n' > "$H/.zsh_sessions/abc.history"
+cand="$(run "$H" __candidates)"
+assert_has "reads .bash_history"           "bashuser|bash.example.com"      "$cand"
+assert_has "reads fish_history"            "fishuser|fish.example.com"      "$cand"
+assert_has "reads .zsh_sessions/*.history" "sessuser|session.example.com"   "$cand"
+
+# --------------------------------------------------------------------------
+section "history parsing: globbing safety"
+
+H="$(newhome glob)"
+touch "$H/aaa.log" "$H/bbb.log"
+printf ': 1:0;ssh globber@globs.example.com *.log\n' > "$H/.zsh_history"
+cand="$(cd "$H" && HOME="$H" "$SSHUI" __candidates 2>&1)"
+assert_has   "an unquoted glob in history does not expand" "1|globber|globs.example.com|" "$cand"
+assert_lacks "no filenames leak in from the cwd"           "aaa.log"                      "$cand"
+
+# --------------------------------------------------------------------------
+section "known_hosts"
+
+H="$(newhome kh)"
+cat > "$H/.ssh/known_hosts" <<'EOF'
+|1|c2FsdA==|aGFzaA== ssh-ed25519 AAAAC3Nz
+plain.example.com,198.51.100.7 ssh-rsa AAAAB3Nz
+[bracketed.example.com]:2222 ssh-ed25519 AAAAC3Nz
+EOF
+out="$(run "$H" scan -n)"
+assert_has   "unhashed known_hosts name is offered"  "HostName plain.example.com"      "$out"
+assert_has   "comma-separated alias is offered"      "HostName 198.51.100.7"           "$out"
+assert_has   "[host]:port form is unwrapped"         "HostName bracketed.example.com"  "$out"
+assert_lacks "hashed entries are skipped"            "|1|"                             "$out"
+assert_has   "no username is flagged, not invented"  "# User ?"                        "$out"
+
+# --------------------------------------------------------------------------
+section "scan: writing to ~/.ssh/config"
+
+H="$(newhome write)"
+cat > "$H/.ssh/config" <<'EOF'
+Host *
+    ServerAliveInterval 60
+
+Host mine-by-hand
+    HostName hand.example.com
+    User luca
+EOF
+cat > "$H/.zsh_history" <<'EOF'
+: 1:0;ssh -p 2222 deploy@web1.example.com
+: 2:0;ssh dba@db.example.com
+EOF
+out="$(import_all "$H")"
+cfg="$(cat "$H/.ssh/config")"
+
+assert_has "reports the file it wrote"        "Updated"                    "$out"
+assert_has "imports a discovered host"        "Host web1"                  "$cfg"
+assert_has "carries the username over"        "User deploy"                "$cfg"
+assert_has "carries a non-default port over"  "Port 2222"                  "$cfg"
+n="$(printf '%s\n' "$cfg" | grep -cE '^[[:space:]]*Port 22$' || true)"
+assert_eq "does not write a redundant Port 22" "0" "$n"
+assert_has "keeps hand-written stanzas"       "Host mine-by-hand"          "$cfg"
+assert_has "keeps the Host * block"           "ServerAliveInterval 60"     "$cfg"
+
+# the managed block must come first, or a leading `Host *` would win in ssh_config
+first_marker="$(grep -n 'sshui managed hosts' "$H/.ssh/config" | head -1 | cut -d: -f1)"
+first_host="$(grep -n '^Host ' "$H/.ssh/config" | head -1 | cut -d: -f1)"
+if [ -n "$first_marker" ] && [ "$first_marker" -lt "$first_host" ]; then
+  ok "managed block is above every pre-existing Host"
+else
+  no "managed block is above every pre-existing Host"
+fi
+
+perm="$(ls -l "$H/.ssh/config" | cut -c1-10)"
+assert_eq "config stays mode 600" "-rw-------" "$perm"
+
+n="$(count_backups "$H/.ssh")"
+if [ "$n" -ge 1 ]; then ok "a backup was written"; else no "a backup was written"; fi
+
+# --------------------------------------------------------------------------
+section "scan: idempotency"
+
+out="$(run "$H" scan -n)"
+assert_has "a second scan finds nothing new" "Nothing new found" "$out"
+
+hosts_before="$(run "$H" list)"
+import_all "$H" >/dev/null
+hosts_after="$(run "$H" list)"
+assert_eq "re-importing does not duplicate anything" "$hosts_before" "$hosts_after"
+
+printf ': 3:0;ssh later@added-later.example.com\n' >> "$H/.zsh_history"
+import_all "$H" >/dev/null
+out="$(run "$H" list)"
+assert_has "a newly used host is picked up later"  "added-later.example.com" "$out"
+assert_has "earlier imports survive the new one"   "web1"                    "$out"
+assert_has "hand-written stanzas still survive"    "mine-by-hand"            "$out"
+
+# --------------------------------------------------------------------------
+section "scan: does not re-add what config already covers"
+
+H="$(newhome covered)"
+printf 'Host prod\n    HostName prod.example.com\n    User deploy\n' > "$H/.ssh/config"
+cat > "$H/.zsh_history" <<'EOF'
+: 1:0;ssh deploy@prod.example.com
+: 2:0;ssh prod
+EOF
+out="$(run "$H" scan -n)"
+assert_has "skips a user@host already in config" "Nothing new found" "$out"
+
+H="$(newhome covered2)"
+printf 'Host prod\n    HostName prod.example.com\n    User deploy\n' > "$H/.ssh/config"
+printf ': 1:0;ssh someoneelse@prod.example.com\n' > "$H/.zsh_history"
+out="$(run "$H" scan -n)"
+assert_has "but a different user on the same host is new" "User someoneelse" "$out"
+
+# --------------------------------------------------------------------------
+section "alias generation"
+
+H="$(newhome alias)"
+cat > "$H/.zsh_history" <<'EOF'
+: 1:0;ssh a@10.0.0.1
+: 2:0;ssh one@dup.example.com
+: 3:0;ssh two@dup.example.net
+: 4:0;ssh three@dup.example.org
+EOF
+out="$(run "$H" scan -n)"
+assert_has "IP addresses get a readable alias" "Host srv-10-0-0-1" "$out"
+assert_has "first of a name collision"         "Host dup"          "$out"
+n="$(printf '%s\n' "$out" | grep -c '^Host dup')"
+assert_eq "colliding names all get distinct aliases" "3" "$n"
+n_uniq="$(printf '%s\n' "$out" | grep '^Host ' | sort -u | wc -l | tr -d ' ')"
+n_all="$(printf '%s\n' "$out" | grep -c '^Host ')"
+assert_eq "no duplicate aliases at all" "$n_all" "$n_uniq"
+
+H="$(newhome alias2)"
+printf 'Host web1\n    HostName old.example.com\n' > "$H/.ssh/config"
+printf ': 1:0;ssh new@web1.example.com\n' > "$H/.zsh_history"
+out="$(run "$H" scan -n)"
+assert_lacks "never reuses an alias that already exists" "Host web1
+" "$out"
+
+# --------------------------------------------------------------------------
+section "scan: fresh machine with no ~/.ssh"
+
+H="$WORK/bare"; rm -rf "$H"; mkdir -p "$H"
+printf ': 1:0;ssh admin@fresh.example.com\n' > "$H/.zsh_history"
+import_all "$H" >/dev/null
+if [ -f "$H/.ssh/config" ]; then ok "creates ~/.ssh/config when absent"; else no "creates ~/.ssh/config when absent"; fi
+perm="$(ls -ld "$H/.ssh" | cut -c1-10)"
+assert_eq "creates ~/.ssh as mode 700" "drwx------" "$perm"
+assert_has "and imports into it" "fresh.example.com" "$(run "$H" list)"
+
+# --------------------------------------------------------------------------
+section "scan: refuses to write a config ssh cannot parse"
+
+if command -v ssh >/dev/null 2>&1; then
+  H="$(newhome badwrite)"
+  printf 'Host keeper\n    HostName keep.example.com\n' > "$H/.ssh/config"
+  printf ': 1:0;ssh someone@new.example.com\n' > "$H/.zsh_history"
+  before="$(cat "$H/.ssh/config")"
+
+  ed="$WORK/bad-editor"
+  printf '#!/bin/sh\nprintf "Host oops\\n    NotARealSshOption yes\\n" >> "$1"\n' > "$ed"
+  chmod +x "$ed"
+
+  out="$(printf 'e\n' | HOME="$H" SSHUI_ALL=1 EDITOR="$ed" "$SSHUI" scan 2>&1)"
+  after="$(cat "$H/.ssh/config")"
+
+  assert_has "reports the validation failure" "NOT changed" "$out"
+  assert_eq  "leaves the config byte-identical" "$before" "$after"
+  assert_eq "cleans up the unused backup" "0" "$(count_backups "$H/.ssh")"
+else
+  skip "config validation" "ssh not installed"
+fi
+
+# --------------------------------------------------------------------------
+section "picker plumbing"
+
+H="$(newhome pick)"
+cat > "$H/.ssh/config" <<'EOF'
+Host alpha
+    HostName a.example.com
+    User one
+Host beta
+    HostName b.example.com
+    User two
+    Port 2020
+EOF
+lines="$(run "$H" __lines)"
+n="$(printf '%s\n' "$lines" | wc -l | tr -d ' ')"
+assert_eq "one fzf line per host" "2" "$n"
+
+# column 2 (after the tab) is the payload fzf hands back
+payload="$(printf '%s\n' "$lines" | sed -n 2p | cut -f2)"
+assert_eq "payload column is the bare alias" "beta" "$payload"
+display="$(printf '%s\n' "$lines" | sed -n 2p | cut -f1)"
+assert_has "display column shows user@host:port" "two@b.example.com:2020" "$display"
+
+prev="$(run "$H" __preview beta)"
+assert_has "preview shows the target"     "two@b.example.com:2020" "$prev"
+assert_has "preview shows the stanza"     "Host beta"              "$prev"
+if command -v ssh >/dev/null 2>&1; then
+  assert_has "preview shows resolved values" "hostname" "$prev"
+  assert_lacks "preview hides ssh's default identityfiles" "id_dsa" "$prev"
+else
+  skip "preview resolved values" "ssh not installed"
+fi
+
+out="$(run "$H" __preview does-not-exist)"
+if [ -n "$out" ]; then ok "preview of an unknown alias does not crash"; else ok "preview of an unknown alias is empty"; fi
+
+# --------------------------------------------------------------------------
+section "empty state"
+
+H="$(newhome empty)"
+out="$(run "$H" list)"
+assert_has "list explains what to do next" "run: sshui scan" "$out"
+out="$(run "$H" help)"
+assert_has "help lists the scan command" "sshui scan" "$out"
+
+# --------------------------------------------------------------------------
+section "zsh integration"
+
+if command -v zsh >/dev/null 2>&1; then
+  H="$(newhome zsh)"
+  printf 'Host zhost\n    HostName z.example.com\n' > "$H/.ssh/config"
+  Z="$ROOT/sshui.zsh"
+
+  out="$(HOME="$H" zsh -ic "source '$Z'; whence -w ssh" 2>&1 | tail -1)"
+  assert_eq "interactive zsh wraps ssh in a function" "ssh: function" "$out"
+
+  out="$(HOME="$H" zsh -c "source '$Z'; whence -w ssh" 2>&1 | tail -1)"
+  assert_eq "non-interactive zsh leaves ssh alone" "ssh: command" "$out"
+
+  out="$(HOME="$H" zsh -ic "source '$Z'; echo \$SSHUI_BIN" 2>&1 | tail -1)"
+  assert_eq "engine is found next to sshui.zsh" "$SSHUI" "$out"
+
+  out="$(HOME="$H" zsh -ic "source '$Z'; sshui list" 2>&1)"
+  assert_has "sshui works as a shell function, off PATH" "zhost" "$out"
+
+  # with arguments, the wrapper must not intercept
+  out="$(HOME="$H" zsh -ic "source '$Z'; ssh -V" 2>&1)"
+  assert_has "ssh with arguments reaches the real binary" "OpenSSH" "$out"
+else
+  skip "zsh integration" "zsh not installed"
+fi
+
+# --------------------------------------------------------------------------
+printf '\n'
+if [ "$FAIL" -eq 0 ]; then
+  green "$PASS passed"; printf ', '; dim "$SKIP skipped"; printf '\n'
+  exit 0
+else
+  red "$FAIL failed"; printf ', %s passed, ' "$PASS"; dim "$SKIP skipped"; printf '\n'
+  exit 1
+fi

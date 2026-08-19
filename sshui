@@ -1,0 +1,538 @@
+#!/usr/bin/env bash
+#
+# sshui — fuzzy SSH connection picker backed by ~/.ssh/config
+#
+#   sshui              open the fuzzy picker
+#   sshui <query>      open the picker pre-filtered
+#   sshui scan         discover user@host from shell history, import into ~/.ssh/config
+#   sshui scan -n      dry run: show what scan would add, write nothing
+#   sshui list         print the host table (no fzf needed)
+#   sshui edit         open ~/.ssh/config in $EDITOR
+#   sshui choose       print the chosen alias instead of connecting
+#
+# Requires: bash 3.2+, awk, ssh. fzf only for the picker.
+# Shell integration (bare `ssh` opens the picker) lives in sshui.zsh.
+
+set -uo pipefail
+
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+SSH_DIR="${SSH_DIR:-$HOME/.ssh}"
+CONFIG="${SSHUI_CONFIG:-$SSH_DIR/config}"
+BEGIN_MARK="# >>> sshui managed hosts >>>"
+END_MARK="# <<< sshui managed hosts <<<"
+
+die()  { printf 'sshui: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'sshui: %s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------- ssh_config --
+
+# Print a config file with all `Include` directives expanded inline.
+flatten_config() {
+  local file="$1" depth="${2:-0}" line tok g
+  [ -r "$file" ] || return 0
+  [ "$depth" -gt 8 ] && return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$(printf '%s' "$line" | tr 'A-Z' 'a-z')" in
+      *include*)
+        if [[ "$line" =~ ^[[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]+(.*)$ ]]; then
+          for tok in ${BASH_REMATCH[1]}; do
+            tok="${tok%\"}"; tok="${tok#\"}"
+            case "$tok" in
+              "~"/*) tok="$HOME/${tok#"~"/}" ;;
+              /*)    ;;
+              *)     tok="$SSH_DIR/$tok" ;;
+            esac
+            for g in $tok; do
+              [ -e "$g" ] && flatten_config "$g" $((depth + 1))
+            done
+          done
+          continue
+        fi
+        ;;
+    esac
+    printf '%s\n' "$line"
+  done < "$file"
+}
+
+# TSV: alias \t hostname \t user \t port
+config_hosts() {
+  [ -r "$CONFIG" ] || return 0
+  flatten_config "$CONFIG" | awk '
+    function flush() {
+      for (i = 1; i <= n; i++) {
+        p = pat[i]
+        if (p ~ /[*?!]/) continue
+        h = (hostname != "" ? hostname : p)
+        print p "\t" h "\t" user "\t" (port != "" ? port : "22")
+      }
+      n = 0; hostname = ""; user = ""; port = ""
+    }
+    BEGIN { n = 0 }
+    /^[[:space:]]*#/ { next }
+    NF == 0 { next }
+    { k = tolower($1); sub(/=$/, "", k) }
+    k == "host"     { flush(); for (i = 2; i <= NF; i++) pat[++n] = $i; next }
+    k == "match"    { flush(); next }
+    n == 0          { next }
+    k == "hostname" { hostname = $2; next }
+    k == "user"     { user = $2; next }
+    k == "port"     { port = $2; next }
+    END { flush() }
+  '
+}
+
+# ------------------------------------------------------------------- history --
+
+# Internal record separator. NOT a tab: bash treats tab as IFS whitespace, so
+# `IFS=$'\t' read` collapses `a<TAB><TAB>c` into two fields and empty columns
+# (a missing username, a default port) shift everything left.
+SEP='|'
+
+# Pull the destination out of one ssh command line.
+# echoes: user|host|port   (user/port may be empty); returns 1 if not an ssh cmd
+extract_dest() {
+  local -a t
+  # Deliberate word splitting — with globbing off, so a history line like
+  # `ssh host *.log` can't expand against the current directory.
+  local reglob=0
+  case $- in *f*) ;; *) reglob=1; set -f ;; esac
+  # shellcheck disable=SC2206
+  t=($1)
+  [ "$reglob" = 1 ] && set +f
+
+  local n=${#t[@]} i=0 tok user="" host="" port=""
+
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      ssh|*/ssh)              i=$((i + 1)); break ;;
+      sudo|command|time|nohup) i=$((i + 1)) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$i" -gt 0 ] || return 1
+
+  while [ "$i" -lt "$n" ]; do
+    tok="${t[$i]}"
+    case "$tok" in
+      -p)  port="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
+      -p*) port="${tok#-p}";          i=$((i + 1)) ;;
+      -l)  user="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
+      -l*) user="${tok#-l}";          i=$((i + 1)) ;;
+      # options that consume the next argument
+      -[bcDEeFIiJLmOoQRSWw]) i=$((i + 2)) ;;
+      -*)  i=$((i + 1)) ;;
+      *)   host="$tok"; i=$((i + 1)); break ;;
+    esac
+  done
+
+  # history keeps the quotes you typed: ssh "deploy@host"
+  host="${host%\"}"; host="${host#\"}"
+  host="${host%\'}"; host="${host#\'}"
+  [ -n "$host" ] || return 1
+
+  # OpenSSH also accepts options *after* the destination: `ssh host -p 2222`
+  while [ "$i" -lt "$n" ]; do
+    tok="${t[$i]}"
+    case "$tok" in
+      -p)  [ -n "$port" ] || port="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
+      -p*) [ -n "$port" ] || port="${tok#-p}";          i=$((i + 1)) ;;
+      -l)  [ -n "$user" ] || user="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
+      -l*) [ -n "$user" ] || user="${tok#-l}";          i=$((i + 1)) ;;
+      -[bcDEeFIiJLmOoQRSWw]) i=$((i + 2)) ;;
+      -*)  i=$((i + 1)) ;;
+      *)   break ;;   # remote command — stop
+    esac
+  done
+
+  # ssh://user@host:port/
+  case "$host" in
+    ssh://*)
+      host="${host#ssh://}"; host="${host%%/*}"
+      case "$host" in *:*) port="${host##*:}"; host="${host%:*}" ;; esac
+      ;;
+  esac
+  case "$host" in
+    *@*) user="${host%@*}"; host="${host##*@}" ;;
+  esac
+  host="${host%:}"
+
+  # plausibility: no slashes, no globs, sane charset
+  case "$host" in
+    ""|*/*|*[\*\?\$\`\'\"\(\)\{\}]*|-*|.*) return 1 ;;
+  esac
+  [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]] || return 1
+  [[ "$user" =~ ^[A-Za-z0-9._-]*$ ]] || user=""
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || port=""
+
+  printf '%s%s%s%s%s\n' "$user" "$SEP" "$host" "$SEP" "$port"
+}
+
+history_files() {
+  local f
+  for f in "$HOME/.zsh_history" "$HOME/.bash_history" "$HOME/.history" \
+           "$HOME/.local/share/fish/fish_history"; do
+    [ -r "$f" ] && printf '%s\n' "$f"
+  done
+  for f in "$HOME"/.zsh_sessions/*.history; do
+    [ -r "$f" ] && printf '%s\n' "$f"
+  done
+}
+
+# Records: count|user|host|port   (most-used first)
+scan_history() {
+  local file line
+  while IFS= read -r file; do
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in *ssh*) ;; *) continue ;; esac
+      # zsh EXTENDED_HISTORY:  ": 1699999999:0;cmd"
+      case "$line" in ':'*';'*) line="${line#*;}" ;; esac
+      # fish:  "- cmd: ssh ..."
+      case "$line" in '- cmd: '*) line="${line#- cmd: }" ;; esac
+      # take the last segment of pipes/&&/; so `foo && ssh bar` still counts
+      line="${line##*&& }"; line="${line##*; }"; line="${line##*| }"
+      extract_dest "$line" 2>/dev/null
+    done < "$file"
+  done < <(history_files) \
+    | sort | uniq -c | sed 's/^ *//; s/ /|/' \
+    | awk -F'[|]' '
+        # Fold "same user@host, port unknown" rows into the port we did observe,
+        # so `ssh -p 2022 x@h` and `ssh x@h` do not become two separate hosts.
+        {
+          key = $2 "|" $3
+          if ($4 == "") { empty[key] += $1; next }
+          pk = key "|" $4
+          if (!(pk in cnt)) order[++m] = pk
+          cnt[pk] += $1
+          if (cnt[pk] > best[key]) { best[key] = cnt[pk]; bestpk[key] = pk }
+        }
+        END {
+          for (k in empty) {
+            if (k in bestpk) { cnt[bestpk[k]] += empty[k] }
+            else { pk = k "|"; order[++m] = pk; cnt[pk] = empty[k] }
+          }
+          for (i = 1; i <= m; i++) {
+            split(order[i], a, "|")
+            print cnt[order[i]] "|" a[1] "|" a[2] "|" a[3]
+          }
+        }' \
+    | sort -rn
+}
+
+# ------------------------------------------------------------------ known_hosts --
+
+# Unhashed hostnames only — hashed (|1|...) entries are unrecoverable by design.
+scan_known_hosts() {
+  local f
+  for f in "$SSH_DIR/known_hosts" "$SSH_DIR/known_hosts2"; do
+    [ -r "$f" ] || continue
+    awk '{ n = split($1, a, ","); for (i = 1; i <= n; i++) print a[i] }' "$f"
+  done | grep -v '^|' | sed 's/^\[\(.*\)\]:.*$/\1/' | sort -u
+}
+
+# ------------------------------------------------------------------- aliasing --
+
+sanitize_alias() {
+  local host="$1" base
+  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    base="srv-${host//./-}"
+  else
+    base="${host%%.*}"
+  fi
+  printf '%s' "$(printf '%s' "$base" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._-' '-')"
+}
+
+# ------------------------------------------------------------------ config I/O --
+
+managed_block() {
+  [ -r "$CONFIG" ] || return 0
+  awk -v b="$BEGIN_MARK" -v e="$END_MARK" \
+    'index($0, b) { f = 1; next } index($0, e) { f = 0; next } f' "$CONFIG"
+}
+
+config_without_managed() {
+  [ -r "$CONFIG" ] || return 0
+  awk -v b="$BEGIN_MARK" -v e="$END_MARK" \
+    'index($0, b) { f = 1; next } index($0, e) { f = 0; next } !f' "$CONFIG"
+}
+
+# $1 = file holding the new Host stanzas to add
+install_block() {
+  local additions="$1" stamp backup tmp
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$SSH_DIR"; chmod 700 "$SSH_DIR" 2>/dev/null
+  [ -f "$CONFIG" ] || { : > "$CONFIG"; chmod 600 "$CONFIG"; }
+
+  backup="$CONFIG.sshui-backup-$stamp"
+  cp "$CONFIG" "$backup" || die "could not back up $CONFIG"
+
+  tmp="$(mktemp "${TMPDIR:-/tmp}/sshui.XXXXXX")" || die "mktemp failed"
+  {
+    printf '%s\n' "$BEGIN_MARK"
+    printf '%s\n' "# Managed by sshui. Hand-edits are kept; delete a stanza to drop it."
+    printf '%s\n' "# Kept at the top of the file: in ssh_config the FIRST value for a"
+    printf '%s\n' "# keyword wins, so a later 'Host *' block can't override these."
+    printf '\n'
+    managed_block
+    cat "$additions"
+    printf '%s\n' "$END_MARK"
+    printf '\n'
+    config_without_managed
+  } > "$tmp"
+
+  # collapse runs of blank lines, then validate before committing
+  awk 'NF == 0 { if (blank++) next } NF { blank = 0 } 1' "$tmp" > "$tmp.clean" \
+    && mv "$tmp.clean" "$tmp"
+
+  # Validate with `ssh -G` before committing — but only if the *original* config
+  # already passes, so an ancient ssh without -G (or a pre-existing error in the
+  # user's own config) can't block a legitimate write.
+  if have ssh && ssh -F "$backup" -G sshui-probe.invalid >/dev/null 2>&1 \
+     && ! ssh -F "$tmp" -G sshui-probe.invalid >/dev/null 2>&1; then
+    printf '%s\n' "--- ssh -G said: ---" >&2
+    ssh -F "$tmp" -G sshui-probe.invalid 2>&1 >/dev/null | head -5 >&2
+    rm -f "$tmp" "$backup"
+    die "generated config failed validation; $CONFIG was NOT changed"
+  fi
+
+  cat "$tmp" > "$CONFIG" && chmod 600 "$CONFIG"
+  rm -f "$tmp"
+  printf 'Updated %s (backup: %s)\n' "$CONFIG" "$backup"
+
+  # keep only the 5 most recent backups
+  ls -1t "$CONFIG".sshui-backup-* 2>/dev/null | tail -n +6 | while IFS= read -r old; do
+    rm -f "$old"
+  done
+}
+
+# ---------------------------------------------------------------- subcommands --
+
+cmd_scan() {
+  local dry=0
+  [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ] && dry=1
+
+  local cfg known_pairs known_aliases known_names
+  cfg="$(config_hosts)"
+  known_pairs="$(printf '%s\n'   "$cfg" | awk -F'\t' '{ print tolower($2) "|" tolower($3) }')"
+  known_aliases="$(printf '%s\n' "$cfg" | awk -F'\t' '{ print tolower($1) }')"
+  known_names="$(printf '%s\n'   "$cfg" | awk -F'\t' '{ print tolower($2) }')"
+
+  local -a rows=()
+  local count user host port key hostlc seen_hosts=""
+  while IFS="$SEP" read -r count user host port; do
+    [ -n "${host:-}" ] || continue
+    case "$host" in localhost|127.0.0.1|::1|0.0.0.0) continue ;; esac
+    hostlc="$(printf '%s' "$host" | tr 'A-Z' 'a-z')"
+    key="$hostlc|$(printf '%s' "$user" | tr 'A-Z' 'a-z')"
+    printf '%s\n' "$known_pairs"   | grep -Fxq "$key"    && continue
+    printf '%s\n' "$known_aliases" | grep -Fxq "$hostlc" && continue
+    rows+=("$count$SEP$user$SEP$host$SEP$port")
+    seen_hosts="$seen_hosts
+$hostlc"
+  done < <(scan_history)
+
+  # known_hosts: hosts you have connected to, but it never records a username
+  # (and hashed `|1|...` entries are unrecoverable by design, so they're skipped).
+  while IFS= read -r host; do
+    [ -n "${host:-}" ] || continue
+    case "$host" in localhost|127.0.0.1|::1|0.0.0.0) continue ;; esac
+    hostlc="$(printf '%s' "$host" | tr 'A-Z' 'a-z')"
+    printf '%s\n' "$known_names"   | grep -Fxq "$hostlc" && continue
+    printf '%s\n' "$known_aliases" | grep -Fxq "$hostlc" && continue
+    printf '%s\n' "$seen_hosts"    | grep -Fxq "$hostlc" && continue
+    rows+=("0$SEP$SEP$host$SEP")
+  done < <(scan_known_hosts)
+
+  if [ "${#rows[@]}" -eq 0 ]; then
+    printf 'Nothing new found — %s already covers every host in your history.\n' "$CONFIG"
+    return 0
+  fi
+
+  # ---- pick which ones to import
+  local selected menu r
+  menu="$(for r in "${rows[@]}"; do
+    IFS="$SEP" read -r count user host port <<< "$r"
+    if [ "$count" = "0" ]; then
+      printf '%s\t%s\n' "$(printf '%11s  %s%s' 'known_hosts' "$host" "${port:+:$port}")" "$r"
+    else
+      printf '%s\t%s\n' \
+        "$(printf '%10sx  %s%s%s' "$count" "${user:+$user@}" "$host" "${port:+:$port}")" "$r"
+    fi
+  done)"
+
+  if [ "$dry" -eq 1 ] || [ -n "${SSHUI_ALL:-}" ] || ! have fzf || [ ! -t 0 ]; then
+    selected="$(printf '%s\n' "$menu" | cut -f2-)"
+    if [ "$dry" -eq 0 ] && [ -z "${SSHUI_ALL:-}" ]; then
+      have fzf || warn "fzf not found — falling back to importing everything"
+      [ -t 0 ] || warn "no terminal for interactive selection — importing everything"
+    fi
+  else
+    selected="$(printf '%s\n' "$menu" | fzf --multi --delimiter='\t' --with-nth=1 \
+      --height=80% --reverse --border --prompt='import ❯ ' \
+      --header=$'TAB select · ctrl-a all · ENTER import · ESC cancel\nsorted by how often you used them' \
+      --bind 'ctrl-a:select-all' | cut -f2-)"
+    [ -n "$selected" ] || { printf 'Nothing selected.\n'; return 0; }
+  fi
+
+  # ---- build stanzas with collision-free aliases
+  local taken="$known_aliases" additions name candidate i
+  additions="$(mktemp "${TMPDIR:-/tmp}/sshui-add.XXXXXX")" || die "mktemp failed"
+  while IFS="$SEP" read -r count user host port; do
+    [ -n "${host:-}" ] || continue
+    candidate="$(sanitize_alias "$host")"
+    name="$candidate"
+    if printf '%s\n' "$taken" | grep -Fxq "$name"; then
+      name="${candidate}${user:+-$user}"
+    fi
+    i=2
+    while printf '%s\n' "$taken" | grep -Fxq "$name"; do
+      name="$candidate-$i"; i=$((i + 1))
+    done
+    taken="$taken
+$name"
+    {
+      printf 'Host %s\n' "$name"
+      printf '    HostName %s\n' "$host"
+      if [ -n "$user" ]; then
+        printf '    User %s\n' "$user"
+      else
+        printf '    # User ?   (none recorded — ssh will fall back to your local login)\n'
+      fi
+      [ -n "$port" ] && [ "$port" != "22" ] && printf '    Port %s\n' "$port"
+      printf '\n'
+    } >> "$additions"
+  done <<< "$selected"
+
+  printf '\n--- proposed additions ------------------------------------\n'
+  cat "$additions"
+  printf -- '-----------------------------------------------------------\n'
+
+  if [ "$dry" -eq 1 ]; then
+    printf '(dry run — nothing written)\n'
+    rm -f "$additions"
+    return 0
+  fi
+
+  local answer
+  printf '[w]rite  [e]dit first  [c]ancel ? '
+  read -r answer
+  case "$answer" in
+    e|E) "${EDITOR:-vi}" "$additions"; install_block "$additions" ;;
+    w|W|"") install_block "$additions" ;;
+    *) printf 'Cancelled.\n' ;;
+  esac
+  rm -f "$additions"
+}
+
+cmd_list() {
+  local rows
+  rows="$(config_hosts)"
+  [ -n "$rows" ] || { printf 'No hosts in %s yet — run: sshui scan\n' "$CONFIG"; return 0; }
+  printf '%s\n' "$rows" | sort -f | awk -F'\t' '
+    BEGIN { printf "%-22s %s\n", "ALIAS", "TARGET" }
+    { printf "%-22s %s%s%s\n", $1, ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : "") }'
+}
+
+# What fzf shows in the side panel for the highlighted alias.
+cmd_preview() {
+  local a="${1:-}" line key val
+  [ -n "$a" ] || return 0
+
+  config_hosts | awk -F'\t' -v a="$a" '$1 == a {
+    printf "  %s%s%s\n", ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : "")
+  }'
+
+  if have ssh; then
+    printf '\n  resolved\n'
+    ssh -F "$CONFIG" -G "$a" 2>/dev/null | while read -r key val; do
+      case "$key" in
+        hostname|user|port|proxyjump|proxycommand|forwardagent|localforward|remoteforward)
+          [ "$val" = "none" ] && continue
+          [ "$key" = "forwardagent" ] && [ "$val" = "no" ] && continue
+          printf '    %-14s %s\n' "$key" "$val"
+          ;;
+        identityfile)
+          # only keys that actually exist, so the seven ssh defaults stay hidden
+          # shellcheck disable=SC2088  # matching a literal ~ in ssh -G output
+          case "$val" in "~/"*) [ -f "$HOME/${val#\~/}" ] || continue ;; *) [ -f "$val" ] || continue ;; esac
+          printf '    %-14s %s\n' "$key" "$val"
+          ;;
+      esac
+    done
+  fi
+
+  local disp="$CONFIG"
+  # shellcheck disable=SC2088  # a literal ~ is what we want to display
+  case "$disp" in "$HOME"/*) disp="~/${disp#"$HOME"/}" ;; esac
+  printf '\n  stanza in %s\n' "$disp"
+  flatten_config "$CONFIG" 2>/dev/null | awk -v a="$a" '
+    { k = tolower($1) }
+    k == "host" { inb = 0; for (i = 2; i <= NF; i++) if ($i == a) inb = 1; if (inb) { print "    " $0 }; next }
+    k == "match" { inb = 0; next }
+    inb && NF { print "    " $0 }'
+}
+
+# "alias   user@host:port <TAB> alias" — column 1 is shown, column 2 is the payload
+picker_lines() {
+  config_hosts | sort -f | awk -F'\t' '
+    { printf "%-22s %s%s%s\t%s\n", $1, ($3 != "" ? $3 "@" : ""), $2,
+             ($4 != "22" ? ":" $4 : ""), $1 }'
+}
+
+# Runs fzf and prints the chosen alias on stdout — nothing else goes to stdout,
+# so callers can safely do `target=$(sshui choose)`. fzf draws on /dev/tty, and
+# the ctrl-e / ctrl-r side trips send their output to stderr for the same reason.
+# Returns 1 when nothing was chosen.
+run_picker() {
+  have fzf || { warn "fzf not found. Install it (brew install fzf) or use: sshui list"; return 1; }
+  local lines out key rec
+  lines="$(picker_lines)"
+  if [ -z "$lines" ]; then
+    warn "no hosts in $CONFIG yet — run: sshui scan"
+    return 1
+  fi
+
+  out="$(printf '%s\n' "$lines" \
+    | fzf --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
+        --prompt='ssh ❯ ' --query="${1:-}" \
+        --header=$'ENTER connect · ctrl-e edit config · ctrl-r rescan history' \
+        --expect=ctrl-e,ctrl-r \
+        --preview="'$SELF' __preview {2}" \
+        --preview-window='right:45%')"
+
+  key="$(printf '%s\n' "$out" | sed -n 1p)"
+  rec="$(printf '%s\n' "$out" | sed -n 2p | cut -f2)"
+
+  case "$key" in
+    ctrl-e) "${EDITOR:-vi}" "$CONFIG" >&2; return 1 ;;
+    ctrl-r) cmd_scan >&2; return 1 ;;
+  esac
+  [ -n "$rec" ] || return 1
+  printf '%s\n' "$rec"
+}
+
+# Standalone use: pick, then become ssh.
+cmd_pick() {
+  local rec
+  rec="$(run_picker "${1:-}")" || return 0
+  [ -n "$rec" ] || return 0
+  printf '→ ssh %s\n' "$rec" >&2
+  exec ssh "$rec"
+}
+
+usage() {
+  sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  ""|-\?)            cmd_pick "" ;;
+  scan)              shift; cmd_scan "$@" ;;
+  list|ls)           cmd_list ;;
+  choose)            run_picker "${2:-}" ;;      # print an alias, don't connect
+  __preview)         cmd_preview "${2:-}" ;;     # internal: fzf preview pane
+  __lines)           picker_lines ;;             # internal: what fzf is fed
+  __candidates)      scan_history ;;             # internal: raw history scan
+  edit)              exec "${EDITOR:-vi}" "$CONFIG" ;;
+  help|-h|--help)    usage ;;
+  *)                 cmd_pick "$1" ;;
+esac
