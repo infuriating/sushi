@@ -97,6 +97,22 @@ else
   skip "shellcheck" "not installed"
 fi
 
+# git records the exec bit, and a file copied in from elsewhere arrives 0644 —
+# committing it that way makes CI fail with "Permission denied" long after the
+# working tree looks fine.
+if command -v git >/dev/null 2>&1 && [ -d "$ROOT/.git" ]; then
+  for f in sushi install.sh test/run.sh; do
+    mode="$(cd "$ROOT" && git ls-files -s -- "$f" 2>/dev/null | awk '{ print $1 }')"
+    if [ -z "$mode" ]; then
+      skip "$f is executable in git" "not tracked"
+    else
+      assert_eq "$f is executable in git" "100755" "$mode"
+    fi
+  done
+else
+  skip "tracked exec bits" "not a git checkout"
+fi
+
 # --------------------------------------------------------------------------
 section "ssh_config parsing"
 
@@ -165,10 +181,14 @@ cand="$(run "$H" __candidates)"
 assert_has   "counts repeats"                    "2|root|203.0.113.9|"                    "$cand"
 assert_has   "-p before the host"                "|deploy|staging.example.com|2022"       "$cand"
 assert_has   "-p after the host"                 "1|other|late-flag.example.com|8022"     "$cand"
-assert_has   "skips -i and its argument"         "1|keyed|keys.example.com|"              "$cand"
+assert_has   "-i is kept, not skipped"           "1|keyed|keys.example.com||~/.ssh/id_ed25519|" "$cand"
 assert_has   "skips -o and its argument"         "1|opt|opts.example.com|"                "$cand"
 assert_has   "-J picks the real destination"     "1|deep|behind.example.com|"             "$cand"
-assert_lacks "-J does not yield the jump host"   "bastion.example.com"                    "$cand"
+assert_has   "-J is kept as the proxy jump"      "1|deep|behind.example.com|||jumper@bastion.example.com" "$cand"
+# the jump host must never be mistaken for the destination — check the host
+# field itself, since it now legitimately appears in the proxyjump field
+hosts="$(printf '%s\n' "$cand" | awk -F'|' '{ print $3 }')"
+assert_lacks "the jump host is not a destination" "bastion.example.com" "$hosts"
 assert_has   "-l supplies the username"          "1|flaguser|flag-l.example.com|"         "$cand"
 assert_has   "strips surrounding quotes"         "1|quoted|quotes.example.com|"           "$cand"
 assert_has   "finds ssh after &&"                "1|chained|chain.example.com|"           "$cand"
@@ -177,7 +197,9 @@ assert_has   "host with no username"             "1||nouser.example.com|"       
 assert_has   "preserves hostname case"           "UPPER.Example.COM"                      "$cand"
 assert_lacks "ignores ssh inside a quoted string" "great"                                 "$cand"
 assert_lacks "ignores commented-out commands"    "out.example.com"                        "$cand"
-assert_lacks "ignores ssh-keygen"                "ed25519"                                "$cand"
+# `ed25519` now legitimately appears as an identityfile, so check the host field
+assert_lacks "ignores ssh-keygen"                "ed25519"                                "$hosts"
+assert_lacks "and its flags never become hosts"  "-t"                                     "$hosts"
 assert_lacks "ignores scp"                       "scp.example.com"                        "$cand"
 
 # the -p 2022 / no-port pair must collapse into one entry
@@ -363,6 +385,117 @@ if command -v ssh >/dev/null 2>&1; then
 else
   skip "config validation" "ssh not installed"
 fi
+
+# --------------------------------------------------------------------------
+section "IdentityFile and ProxyJump"
+
+H="$(newhome ij)"
+cat > "$H/.zsh_history" <<'EOF'
+: 1:0;ssh -i ~/.ssh/deploy_ed25519 deploy@keyed.example.com
+: 2:0;ssh -J bastion@jump.example.com deep@behind.example.com
+: 3:0;ssh -i ~/.ssh/id_rsa -J admin@edge.example.com -p 2222 root@both.example.com
+: 4:0;ssh plain@plain.example.com
+: 5:0;ssh -i$HOME/.ssh/unexpanded glued@glued.example.com
+: 6:0;ssh -i '/tmp/has space/key' spaced@spaced.example.com
+EOF
+
+cand="$(run "$H" __candidates)"
+assert_has "records the identity file"     "|deploy|keyed.example.com||~/.ssh/deploy_ed25519|" "$cand"
+assert_has "records the jump host"         "|deep|behind.example.com|||bastion@jump.example.com" "$cand"
+assert_has "both at once, alongside -p"    "|root|both.example.com|2222|~/.ssh/id_rsa|admin@edge.example.com" "$cand"
+assert_has "and a plain host stays plain"  "|plain|plain.example.com|||" "$cand"
+
+# these end up verbatim in ~/.ssh/config, so anything not plainly a path is dropped
+assert_lacks "an unexpanded \$HOME is not written out" "unexpanded" "$cand"
+assert_lacks "nor a path containing spaces"           "has space"  "$cand"
+
+out="$(run "$H" scan -n)"
+assert_has "the stanza carries IdentityFile" "IdentityFile ~/.ssh/deploy_ed25519" "$out"
+assert_has "the stanza carries ProxyJump"    "ProxyJump bastion@jump.example.com" "$out"
+n="$(printf '%s\n' "$out" | grep -c 'IdentityFile')"
+assert_eq "only the hosts that had one" "2" "$n"
+
+# the scan row flags them without breaking the contiguous target
+menu="$(run "$H" __scanmenu)"
+row="$(printf '%s\n' "$menu" | grep both | cut -f1 | sed 's/\x1b\[[0-9;]*m//g')"
+assert_has "the row still matches on user@host:port" "root@both.example.com:2222" "$row"
+assert_has "and flags the key"                        "key"  "$row"
+assert_has "and the bastion"                          "via edge.example.com" "$row"
+
+# and ssh itself has to accept the result
+import_all "$H" > /dev/null
+if command -v ssh >/dev/null 2>&1; then
+  resolved="$(HOME="$H" ssh -F "$H/.ssh/config" -G both 2>/dev/null)"
+  assert_has "ssh -G resolves the proxyjump" "proxyjump admin@edge.example.com" "$resolved"
+  assert_has "ssh -G resolves the identityfile" "identityfile ~/.ssh/id_rsa" "$resolved"
+else
+  skip "ssh -G accepts the generated stanza" "ssh not installed"
+fi
+
+
+# --------------------------------------------------------------------------
+section "picker ordering"
+
+H="$(newhome sortpick)"
+cat > "$H/.ssh/config" <<'EOF'
+Host alpha
+    HostName alpha.example.com
+    User luca
+Host zulu
+    HostName zulu.example.com
+    User luca
+Host mike
+    HostName mike.example.com
+    User deploy
+Host cold
+    HostName cold.example.com
+    User luca
+EOF
+{
+  i=0; while [ "$i" -lt 20 ]; do printf ': %s:0;ssh luca@zulu.example.com\n' "$i"; i=$((i + 1)); done
+  i=0; while [ "$i" -lt 6 ];  do printf ': 1%s:0;ssh deploy@mike.example.com\n' "$i"; i=$((i + 1)); done
+  printf ': 90:0;ssh alpha\n'
+} > "$H/.zsh_history"
+
+export XDG_CACHE_HOME="$WORK/cache"
+order="$(run "$H" __lines | cut -f1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }')"
+assert_eq "most-used host first"  "zulu" "$(printf '%s\n' "$order" | sed -n 1p)"
+assert_eq "then the next"         "mike" "$(printf '%s\n' "$order" | sed -n 2p)"
+assert_eq "a bare \`ssh alias\` counts for that alias" "alpha" "$(printf '%s\n' "$order" | sed -n 3p)"
+assert_eq "never-used hosts trail" "cold" "$(printf '%s\n' "$order" | sed -n 4p)"
+
+order="$(HOME="$H" SUSHI_SORT=alpha "$SUSHI" __lines | cut -f1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }')"
+assert_eq "SUSHI_SORT=alpha is plain A-Z" "alpha" "$(printf '%s\n' "$order" | sed -n 1p)"
+assert_eq "...second"                     "cold"  "$(printf '%s\n' "$order" | sed -n 2p)"
+
+# no history: every host is unused, so A-Z
+rm -f "$H/.zsh_history"
+rm -rf "$XDG_CACHE_HOME"
+order="$(run "$H" __lines | cut -f1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }')"
+assert_eq "with no history it falls back to A-Z" "alpha" "$(printf '%s\n' "$order" | sed -n 1p)"
+
+# the payload column stays clean under both orderings
+assert_eq "payload is still the bare alias" "alpha" "$(run "$H" __lines | sed -n 1p | cut -f2)"
+
+# the cache must not change what you see, only how fast
+H="$(newhome sortcache)"
+printf 'Host one\n    HostName one.example.com\n' > "$H/.ssh/config"
+printf ': 1:0;ssh one\n' > "$H/.zsh_history"
+rm -rf "$XDG_CACHE_HOME"
+first="$(run "$H" __lines)"
+second="$(run "$H" __lines)"
+assert_eq "a warm cache gives identical output" "$first" "$second"
+if [ -f "$XDG_CACHE_HOME/sushi/history" ]; then
+  ok "the history cache is written"
+else
+  no "the history cache is written"
+fi
+# appending to history must invalidate it
+printf ': 2:0;ssh two@two.example.com\n' >> "$H/.zsh_history"
+run "$H" scan -n > /dev/null
+assert_has "appending to history busts the cache" "two.example.com" \
+           "$(run "$H" __lines >/dev/null; cat "$XDG_CACHE_HOME/sushi/history")"
+unset XDG_CACHE_HOME
 
 # --------------------------------------------------------------------------
 section "ignore list"

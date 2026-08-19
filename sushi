@@ -159,7 +159,8 @@ config_hosts() {
 SEP='|'
 
 # Pull the destination out of one ssh command line.
-# echoes: user|host|port   (user/port may be empty); returns 1 if not an ssh cmd
+# echoes: user|host|port|identityfile|proxyjump   (any but host may be empty);
+# returns 1 if the line is not an ssh invocation.
 extract_dest() {
   local -a t
   # Deliberate word splitting — with globbing off, so a history line like
@@ -170,7 +171,7 @@ extract_dest() {
   t=($1)
   [ "$reglob" = 1 ] && set +f
 
-  local n=${#t[@]} i=0 tok user="" host="" port=""
+  local n=${#t[@]} i=0 tok user="" host="" port="" identity="" jump=""
 
   while [ "$i" -lt "$n" ]; do
     case "${t[$i]}" in
@@ -188,8 +189,13 @@ extract_dest() {
       -p*) port="${tok#-p}";          i=$((i + 1)) ;;
       -l)  user="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
       -l*) user="${tok#-l}";          i=$((i + 1)) ;;
-      # options that consume the next argument
-      -[bcDEeFIiJLmOoQRSWw]) i=$((i + 2)) ;;
+      # worth keeping rather than skipping: these belong in the imported stanza
+      -i)  identity="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
+      -i*) identity="${tok#-i}";          i=$((i + 1)) ;;
+      -J)  jump="${t[$((i + 1))]:-}";     i=$((i + 2)) ;;
+      -J*) jump="${tok#-J}";              i=$((i + 1)) ;;
+      # other options that consume the next argument
+      -[bcDEeFLmOoQRSWw]) i=$((i + 2)) ;;
       -*)  i=$((i + 1)) ;;
       *)   host="$tok"; i=$((i + 1)); break ;;
     esac
@@ -208,7 +214,11 @@ extract_dest() {
       -p*) [ -n "$port" ] || port="${tok#-p}";          i=$((i + 1)) ;;
       -l)  [ -n "$user" ] || user="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
       -l*) [ -n "$user" ] || user="${tok#-l}";          i=$((i + 1)) ;;
-      -[bcDEeFIiJLmOoQRSWw]) i=$((i + 2)) ;;
+      -i)  [ -n "$identity" ] || identity="${t[$((i + 1))]:-}"; i=$((i + 2)) ;;
+      -i*) [ -n "$identity" ] || identity="${tok#-i}";          i=$((i + 1)) ;;
+      -J)  [ -n "$jump" ] || jump="${t[$((i + 1))]:-}";         i=$((i + 2)) ;;
+      -J*) [ -n "$jump" ] || jump="${tok#-J}";                  i=$((i + 1)) ;;
+      -[bcDEeFLmOoQRSWw]) i=$((i + 2)) ;;
       -*)  i=$((i + 1)) ;;
       *)   break ;;   # remote command — stop
     esac
@@ -234,7 +244,15 @@ extract_dest() {
   [[ "$user" =~ ^[A-Za-z0-9._-]*$ ]] || user=""
   [[ "$port" =~ ^[0-9]{1,5}$ ]] || port=""
 
-  printf '%s%s%s%s%s\n' "$user" "$SEP" "$host" "$SEP" "$port"
+  # These end up verbatim in ~/.ssh/config, so anything that is not plainly a
+  # path / a destination gets dropped rather than written out.
+  identity="${identity%\"}"; identity="${identity#\"}"
+  case "$identity" in *[!A-Za-z0-9._/~-]*) identity="" ;; esac
+  jump="${jump%\"}"; jump="${jump#\"}"
+  case "$jump" in *[!A-Za-z0-9._@:-]*) jump="" ;; esac
+
+  printf '%s%s%s%s%s%s%s%s%s\n' \
+    "$user" "$SEP" "$host" "$SEP" "$port" "$SEP" "$identity" "$SEP" "$jump"
 }
 
 history_files() {
@@ -274,22 +292,39 @@ scan_history() {
     | awk -F'[|]' '
         # Fold "same user@host, port unknown" rows into the port we did observe,
         # so `ssh -p 2022 x@h` and `ssh x@h` do not become two separate hosts.
+        # identityfile / proxyjump: first non-empty wins. Input order is fixed by
+        # `sort`, so that is deterministic, and one host rarely has two.
         {
           key = $2 "|" $3
-          if ($4 == "") { empty[key] += $1; next }
+          if ($4 == "") {
+            empty[key] += $1
+            if ($5 != "" && eid[key] == "") eid[key] = $5
+            if ($6 != "" && ejp[key] == "") ejp[key] = $6
+            next
+          }
           pk = key "|" $4
           if (!(pk in cnt)) order[++m] = pk
           cnt[pk] += $1
+          if ($5 != "" && id[pk] == "") id[pk] = $5
+          if ($6 != "" && jp[pk] == "") jp[pk] = $6
           if (cnt[pk] > best[key]) { best[key] = cnt[pk]; bestpk[key] = pk }
         }
         END {
           for (k in empty) {
-            if (k in bestpk) { cnt[bestpk[k]] += empty[k] }
-            else { pk = k "|"; order[++m] = pk; cnt[pk] = empty[k] }
+            if (k in bestpk) {
+              pk = bestpk[k]
+              cnt[pk] += empty[k]
+              if (id[pk] == "" && eid[k] != "") id[pk] = eid[k]
+              if (jp[pk] == "" && ejp[k] != "") jp[pk] = ejp[k]
+            } else {
+              pk = k "|"; order[++m] = pk; cnt[pk] = empty[k]
+              id[pk] = eid[k]; jp[pk] = ejp[k]
+            }
           }
           for (i = 1; i <= m; i++) {
-            split(order[i], a, "|")
-            print cnt[order[i]] "|" a[1] "|" a[2] "|" a[3]
+            pk = order[i]
+            split(pk, a, "|")
+            print cnt[pk] "|" a[1] "|" a[2] "|" a[3] "|" id[pk] "|" jp[pk]
           }
         }' \
     | sort -rn
@@ -558,7 +593,7 @@ scan_candidates() {
         if (host == "") next
         h = tolower(host)
         if (boring(h) || h in name || h in alias || h in seen) next
-        print "0||" host "|"
+        print "0||" host "|||"
       }
     '
 }
@@ -569,23 +604,29 @@ scan_candidates() {
 # Only column 1 is displayed; 2 is what import consumes, 3 is what ctrl-x feeds
 # to `sushi ignore`. Ignored candidates are dropped here.
 menu_from_candidates() {
-  local line count user host port
+  local line count user host port identity jump
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    IFS="$SEP" read -r count user host port <<< "$line"
+    IFS="$SEP" read -r count user host port identity jump <<< "$line"
     [ -n "${host:-}" ] || continue
     is_ignored "$user" "$host" && continue
     # One printf per row, no command substitution: this runs for every row on
     # every reload, and `$( )` here cost two forks a row.
-    local target
+    local target extra=""
+    # After the target, never inside it: fzf matches on the visible column, and
+    # `user@host:port` has to stay one contiguous run.
+    [ -n "$identity" ] && extra=" key"
+    [ -n "$jump" ] && extra="$extra via ${jump##*@}"
     if [ "$count" = "0" ]; then
       target="$host${port:+:$port}"
-      printf '%s%11s%s  %s%s%s\t%s\t%s\n' \
-        "$C_VIOLET" 'known_hosts' "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$line" "$host"
+      printf '%s%11s%s  %s%s%s%s%s%s\t%s\t%s\n' \
+        "$C_VIOLET" 'known_hosts' "$C_OFF" "$C_RICE" "$target" "$C_OFF" \
+        "$C_CYAN" "$extra" "$C_OFF" "$line" "$host"
     else
       target="${user:+$user@}$host${port:+:$port}"
-      printf '%s%10sx%s  %s%s%s\t%s\t%s\n' \
-        "$C_DIM" "$count" "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$line" "${user:+$user@}$host"
+      printf '%s%10sx%s  %s%s%s%s%s%s\t%s\t%s\n' \
+        "$C_DIM" "$count" "$C_OFF" "$C_RICE" "$target" "$C_OFF" \
+        "$C_CYAN" "$extra" "$C_OFF" "$line" "${user:+$user@}$host"
     fi
   done
 }
@@ -643,11 +684,11 @@ cmd_scan() {
   export SUSHI_SCAN_CACHE="$cache" SUSHI_SCAN_PENDING="$pending"
 
   # one pass over the history; the menu and the hidden tally both come from it
-  local menu selected count user host port hidden=0
+  local menu selected count user host port identity jump hidden=0
   scan_candidates > "$cache"
   menu="$(menu_from_candidates < "$cache")"
 
-  while IFS="$SEP" read -r count user host port; do
+  while IFS="$SEP" read -r count user host port identity jump; do
     [ -n "${host:-}" ] || continue
     is_ignored "$user" "$host" && hidden=$((hidden + 1))
   done < "$cache"
@@ -701,7 +742,7 @@ sorted by how often you used them$hidden_note" \
   local taken additions name candidate i
   taken="$(config_hosts | awk -F'\t' '{ print tolower($1) }')"
   additions="$(mktemp "${TMPDIR:-/tmp}/sushi-add.XXXXXX")" || die "mktemp failed"
-  while IFS="$SEP" read -r count user host port; do
+  while IFS="$SEP" read -r count user host port identity jump; do
     [ -n "${host:-}" ] || continue
     candidate="$(sanitize_alias "$host")"
     name="$candidate"
@@ -723,6 +764,10 @@ $name"
         printf '    # User ?   (none recorded — ssh will fall back to your local login)\n'
       fi
       [ -n "$port" ] && [ "$port" != "22" ] && printf '    Port %s\n' "$port"
+      # Recovered from the command line you actually typed, so a host that needs a
+      # specific key or a bastion imports without hand-editing.
+      [ -n "$identity" ] && printf '    IdentityFile %s\n' "$identity"
+      [ -n "$jump" ] && printf '    ProxyJump %s\n' "$jump"
       printf '\n'
     } >> "$additions"
   done <<< "$selected"
@@ -758,11 +803,11 @@ $name"
 # 19-second wait before the menu appeared. One awk over two streams now, the same
 # marker trick scan_candidates uses (a multi-line -v would break on macOS awk).
 ignore_rows() {
-  local line count user host port target
+  local line count user host port identity jump target
 
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    IFS="$SEP" read -r count user host port <<< "$line"
+    IFS="$SEP" read -r count user host port identity jump <<< "$line"
     # Already dismissed: offering it again in the very picker you dismissed it
     # from is just noise. `sushi ignore --list` and `--remove` are where the
     # ignore list itself is visible.
@@ -964,14 +1009,89 @@ cmd_preview() {
     inb && NF { print "    " d $0 z }'
 }
 
+# scan_history, memoised for the picker.
+#
+# Ordering by usage means the picker needs the history counts, and re-parsing the
+# history on every `ssh` press costs ~250ms. The signature is the combined byte
+# size of the history files, which changes whenever you run anything; a stale hit
+# only means slightly stale *ordering*, so this fails benign.
+#
+# scan and ignore deliberately do NOT use this: they are explicit actions where a
+# fresh read is what you asked for.
+scan_history_cached() {
+  local dir="${SUSHI_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/sushi}"
+  local f="$dir/history" sig line
+  local -a files=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && files+=("$line")
+  done < <(history_files)
+  if [ "${#files[@]}" -eq 0 ]; then
+    scan_history
+    return 0
+  fi
+  sig="${#files[@]}:$(wc -c -- "${files[@]}" 2>/dev/null | tail -1 | awk '{ print $1 }')"
+
+  if [ -r "$f" ] && IFS= read -r line < "$f" && [ "$line" = "#sig $sig" ]; then
+    tail -n +2 "$f"
+    return 0
+  fi
+
+  local out
+  out="$(scan_history)"
+  if mkdir -p "$dir" 2>/dev/null; then
+    { printf '#sig %s\n' "$sig"; printf '%s\n' "$out"; } > "$f.tmp" 2>/dev/null \
+      && mv "$f.tmp" "$f" 2>/dev/null
+  fi
+  printf '%s\n' "$out"
+}
+
 # "alias   user@host:port <TAB> alias" — column 1 is shown, column 2 is the payload
+#
+# Ordered by how often you actually reach each host, not alphabetically: the
+# counts already come out of the history scan, and `bastion` being first because
+# it starts with b is not useful. Hosts with no history fall to the bottom,
+# alphabetically among themselves. SUSHI_SORT=alpha restores plain A-Z.
+#
+# Usage is matched on hostname+user, so it survives renaming an alias, and on the
+# alias itself, which catches `ssh staging` where the alias IS what you typed.
 picker_lines() {
-  # Colours arrive as -v: single-line values, so onetrueawk is fine with them.
-  config_hosts | sort -f | awk -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
-    {
-      tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
-      printf "%s%-22s%s %s%s%s\t%s\n", a, $1, z, t, tgt, z, $1
-    }'
+  if [ "${SUSHI_SORT:-usage}" = alpha ]; then
+    config_hosts | sort -f | awk -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
+      {
+        tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
+        printf "%s%-22s%s %s%s%s\t%s\n", a, $1, z, t, tgt, z, $1
+      }'
+    return 0
+  fi
+
+  # Two streams behind a marker, the usual shape — a multi-line `awk -v` breaks
+  # on macOS awk.
+  {
+    scan_history_cached
+    printf '%s\n' '@@SUSHI_CONFIG@@'
+    config_hosts
+  } | awk -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
+      BEGIN { FS = "|"; mode = 0 }
+      $0 == "@@SUSHI_CONFIG@@" { mode = 1; FS = "\t"; next }
+      mode == 0 {
+        # count|user|host|port|...  — key on host+user and on the bare host, so a
+        # bare `ssh alias` in the history counts for that alias too
+        used[tolower($3) SUBSEP tolower($2)] += $1
+        bare[tolower($3)] += $1
+        next
+      }
+      mode == 1 {
+        split($0, f, "\t")
+        if (f[1] == "") next
+        n = used[tolower(f[2]) SUBSEP tolower(f[3])]
+        if (n == 0) n = bare[tolower(f[1])]
+        tgt = (f[3] != "" ? f[3] "@" : "") f[2] (f[4] != "22" ? ":" f[4] : "")
+        # sort columns, stripped below: used-or-not, then count descending,
+        # then name — so your daily hosts lead and the cold ones trail in A-Z
+        printf "%d\t%d\t%s\t%s%-22s%s %s%s%s\t%s\n", \
+          (n > 0 ? 0 : 1), n, f[1], a, f[1], z, t, tgt, z, f[1]
+      }
+    ' | sort -t"$(printf '\t')" -k1,1n -k2,2nr -k3,3f | cut -f4-
 }
 
 # Runs fzf and prints the chosen alias on stdout — nothing else goes to stdout,

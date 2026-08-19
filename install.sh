@@ -64,7 +64,7 @@ fi
 
 printf '\nsushi\n\n'
 
-chmod +x "$HERE/sushi"
+chmod +x "$HERE/sushi" "$HERE/install.sh" "$HERE/test/run.sh" 2>/dev/null || true
 info "engine:      $HERE/sushi"
 info "integration: $HERE/sushi.zsh"
 

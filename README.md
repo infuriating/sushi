@@ -70,6 +70,10 @@ ssh staging       # untouched — goes straight to the real ssh
 …where `ssh` on its own opens the picker in the default mode. Inside it: type to filter, `ENTER` to
 connect, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan history. In the `scan` picker, `ctrl-x` dismisses rows.
 
+The picker is ordered by how often you actually reach each host, not
+alphabetically — `bastion` being first because it starts with b is not useful. Hosts with no history
+trail at the bottom, A-Z among themselves. `SUSHI_SORT=alpha` restores plain alphabetical.
+
 Other commands: `sushi list` prints the host table, `sushi edit` opens the config,
 `sushi choose` prints an alias instead of connecting (useful for your own scripts).
 
@@ -223,6 +227,12 @@ Either way the command lands in your shell history, so `↑` repeats it and the 
 stores host keys, so it has **no usernames at all**, and with `HashKnownHosts yes` — the default
 on most systems — the hostnames are SHA-1 hashed and cannot be recovered. sushi offers the
 unhashed entries with a commented-out `# User ?` line rather than guessing.
+
+`-i` and `-J` are not just skipped, they're kept: `ssh -i ~/.ssh/deploy_key -J bastion@edge web1`
+imports as a stanza with `IdentityFile` and `ProxyJump` already filled in, so a host behind a
+bastion or on a specific key works without hand-editing. Anything that isn't plainly a path or a
+destination is dropped rather than written into your config — an unexpanded `$HOME`, a path with
+spaces. In the `scan` list those rows are flagged `key` and `via <bastion>`.
 
 History parsing handles `-p`, `-l`, `-i`, `-o`, `-J` and friends, options before *or* after the
 destination (`ssh host -p 2222` is valid OpenSSH), `ssh://user@host:port` URLs, quoting, and
