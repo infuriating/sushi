@@ -115,6 +115,36 @@ The ignore list lives at `~/.ssh/sushi-ignore` (`SUSHI_IGNORE` to move it) — o
 `~/.ssh/config` and the picker are never filtered by it. `scan` reports how many candidates it hid
 rather than quietly shrinking its list.
 
+### Look
+
+The default theme is taken off the logo — cyan through violet to magenta, on the near-black of the
+nori:
+
+| | |
+| --- | --- |
+| `#22c7e8` cyan | match highlights, markers, key paths |
+| `#8c6fe0` violet | headers, section labels, borders |
+| `#ec4899` magenta | prompt, pointer, the `imported` tag |
+| `#f472b6` rose | the resolved target in the preview |
+| `#14101f` nori | — (the background is left transparent) |
+| `#fdf7fb` rice | aliases and values |
+
+The background is deliberately `-1`, so your terminal's own background and transparency show
+through rather than being painted over.
+
+Two escape hatches:
+
+```bash
+SUSHI_THEME=none            # no colours at all; FZF_DEFAULT_OPTS decides
+SUSHI_FZF_OPTS='--height=40% --layout=default --preview-window=down,60%'
+```
+
+`SUSHI_FZF_OPTS` is appended after everything sushi passes, and fzf lets the later flag win, so it
+overrides any of this — including the geometry the call sites set.
+
+`sushi list` only colours itself when stdout is a terminal, so piping or capturing it gives you
+clean text.
+
 ### Shell integration modes
 
 How the picker is reached is configurable, because the obvious approach — defining a shell

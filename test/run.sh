@@ -663,6 +663,54 @@ out="$(run "$H" __preview does-not-exist)"
 if [ -n "$out" ]; then ok "preview of an unknown alias does not crash"; else ok "preview of an unknown alias is empty"; fi
 
 # --------------------------------------------------------------------------
+section "theme"
+
+H="$(newhome theme)"
+printf 'Host alpha\n    HostName a.example.com\n    User one\n    Port 2020\n' > "$H/.ssh/config"
+printf ': 1:0;ssh two@b.example.com\n' > "$H/.zsh_history"
+
+esc="$(printf '\033')"
+
+# Colours must never break the tab-delimited contract fzf depends on, and the
+# payload columns have to stay clean — they get passed back to ssh and to
+# `sushi ignore`.
+line="$(run "$H" __lines)"
+assert_has "picker rows are coloured"        "${esc}[" "$line"
+n="$(printf '%s\n' "$line" | awk -F'\t' 'NF != 2' | wc -l | tr -d ' ')"
+assert_eq  "still exactly two columns" "0" "$n"
+assert_eq  "the payload column has no escapes" "alpha" "$(printf '%s' "$line" | cut -f2)"
+assert_has "and the visible column is still greppable" "one@a.example.com:2020" \
+           "$(printf '%s' "$line" | cut -f1)"
+
+menu="$(run "$H" __scanmenu)"
+n="$(printf '%s\n' "$menu" | awk -F'\t' 'NF != 3' | wc -l | tr -d ' ')"
+assert_eq  "scan rows still have three columns" "0" "$n"
+assert_eq  "the ignore-pattern column is clean" "two@b.example.com" \
+           "$(printf '%s' "$menu" | cut -f3)"
+assert_has "the target stays contiguous for matching" "two@b.example.com" \
+           "$(printf '%s' "$menu" | cut -f1)"
+
+# SUSHI_THEME=none must leave everything byte-plain, for anyone who themes fzf
+# themselves or pipes the output around
+plain="$(HOME="$H" SUSHI_THEME=none "$SUSHI" __lines 2>&1)"
+assert_lacks "SUSHI_THEME=none emits no escapes"  "${esc}[" "$plain"
+plain="$(HOME="$H" SUSHI_THEME=none "$SUSHI" __scanmenu 2>&1)"
+assert_lacks "...in the scan menu either"         "${esc}[" "$plain"
+plain="$(HOME="$H" SUSHI_THEME=none "$SUSHI" __preview alpha 2>&1)"
+assert_lacks "...nor the preview"                 "${esc}[" "$plain"
+
+# list is captured by scripts far more often than it is read, so it only colours
+# itself on a terminal
+assert_lacks "list is plain when piped" "${esc}[" "$(run "$H" list)"
+
+# the preview is rendered by fzf, so it always colours
+assert_has "the preview is coloured" "${esc}[" "$(run "$H" __preview alpha)"
+
+# a bad SUSHI_FZF_OPTS must not wedge anything that does not use fzf
+out="$(HOME="$H" SUSHI_FZF_OPTS='--nonsense' "$SUSHI" list 2>&1)"
+assert_has "SUSHI_FZF_OPTS does not affect non-fzf commands" "alpha" "$out"
+
+# --------------------------------------------------------------------------
 section "empty state"
 
 H="$(newhome empty)"

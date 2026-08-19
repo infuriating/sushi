@@ -31,6 +31,62 @@ END_MARK="# <<< sushi managed hosts <<<"
 # into a picker search for the word "ignore".
 SUBCOMMANDS='scan ignore delete rm list ls edit help choose'
 
+# --------------------------------------------------------------------------- theme --
+#
+# Cyan -> magenta on near-black, taken off the sushi logo:
+#   #22c7e8 cyan (top edge)   #8c6fe0 violet (the blend)
+#   #ec4899 magenta (body)    #f472b6 rose (the inner swirl)
+#   #14101f nori (base)       #fdf7fb rice (the top)
+#
+# SUSHI_THEME=none leaves every colour to your terminal and FZF_DEFAULT_OPTS.
+# SUSHI_FZF_OPTS is appended to every fzf call, so it wins over all of this.
+: "${SUSHI_THEME:=sushi}"
+: "${SUSHI_FZF_OPTS:=}"
+
+C_CYAN=$'\033[38;2;34;199;232m'
+C_VIOLET=$'\033[38;2;140;111;224m'
+C_PINK=$'\033[38;2;236;72;153m'
+C_ROSE=$'\033[38;2;244;114;182m'
+C_RICE=$'\033[1;38;2;253;247;251m'
+C_DIM=$'\033[38;2;122;110;145m'
+C_OFF=$'\033[0m'
+
+# Blank the palette when theming is off, so every call site can interpolate the
+# variables unconditionally.
+if [ "$SUSHI_THEME" = none ]; then
+  C_CYAN=""; C_VIOLET=""; C_PINK=""; C_ROSE=""; C_RICE=""; C_DIM=""; C_OFF=""
+fi
+
+# Only the colour keys every fzf since 0.24 understands — `label` and
+# `preview-border` look better but make older versions exit with a usage error.
+FZF_THEME_ARGS=()
+if [ "$SUSHI_THEME" != none ]; then
+  FZF_THEME_ARGS=(
+    --color='fg:#a99fbd,bg:-1,hl:#22c7e8'
+    --color='fg+:#fdf7fb,bg+:#241a33,hl+:#5ad9f5'
+    --color='info:#8c6fe0,prompt:#ec4899,pointer:#ec4899'
+    --color='marker:#22c7e8,spinner:#8c6fe0,header:#8c6fe0'
+    --color='border:#5b4a7d,gutter:-1'
+    --pointer='▍'
+    --marker='◆'
+  )
+fi
+
+FZF_USER_ARGS=()
+if [ -n "$SUSHI_FZF_OPTS" ]; then
+  # shellcheck disable=SC2206  # deliberate splitting: this is an option list
+  FZF_USER_ARGS=($SUSHI_FZF_OPTS)
+fi
+
+# Theme first (weakest), the call site's own options next, SUSHI_FZF_OPTS last —
+# fzf lets the later flag win, so anything you set overrides everything here.
+# The `${a[@]+...}` form is for bash 3.2, where "${empty[@]}" trips `set -u`.
+FZF() {
+  fzf ${FZF_THEME_ARGS[@]+"${FZF_THEME_ARGS[@]}"} \
+      "$@" \
+      ${FZF_USER_ARGS[@]+"${FZF_USER_ARGS[@]}"}
+}
+
 die()  { printf 'sushi: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'sushi: %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -511,12 +567,15 @@ menu_from_candidates() {
     is_ignored "$user" "$host" && continue
     # One printf per row, no command substitution: this runs for every row on
     # every reload, and `$( )` here cost two forks a row.
+    local target
     if [ "$count" = "0" ]; then
-      printf '%11s  %s%s\t%s\t%s\n' \
-        'known_hosts' "$host" "${port:+:$port}" "$line" "$host"
+      target="$host${port:+:$port}"
+      printf '%s%11s%s  %s%s%s\t%s\t%s\n' \
+        "$C_VIOLET" 'known_hosts' "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$line" "$host"
     else
-      printf '%10sx  %s%s%s\t%s\t%s\n' \
-        "$count" "${user:+$user@}" "$host" "${port:+:$port}" "$line" "${user:+$user@}$host"
+      target="${user:+$user@}$host${port:+:$port}"
+      printf '%s%10sx%s  %s%s%s\t%s\t%s\n' \
+        "$C_DIM" "$count" "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$line" "${user:+$user@}$host"
     fi
   done
 }
@@ -601,7 +660,7 @@ cmd_scan() {
   else
     # ctrl-x only notes the pattern and redraws from the cache; the ignore file is
     # written once, below, after the picker closes.
-    selected="$(printf '%s\n' "$menu" | fzf --multi --delimiter='\t' --with-nth=1 \
+    selected="$(printf '%s\n' "$menu" | FZF --ansi --multi --delimiter='\t' --with-nth=1 \
       --height=80% --reverse --border --prompt='import ❯ ' \
       --header="TAB select · ctrl-a all · ENTER import · ctrl-x never show again · ESC cancel
 sorted by how often you used them$hidden_note" \
@@ -712,7 +771,7 @@ cmd_ignore() {
       cur="$(ignore_entries)"
       [ -n "$cur" ] || { printf 'Nothing ignored yet (%s)\n' "$IGNORE"; return 0; }
       if have fzf && [ -t 0 ]; then
-        sel="$(printf '%s\n' "$cur" | fzf --multi --height=60% --reverse --border \
+        sel="$(printf '%s\n' "$cur" | FZF --multi --height=60% --reverse --border \
           --prompt='un-ignore ❯ ' --header='TAB select · ENTER confirm · ESC cancel' \
           --bind 'ctrl-a:select-all')"
         [ -n "$sel" ] || { printf 'Nothing selected.\n'; return 0; }
@@ -751,7 +810,8 @@ EOF
     [ -n "$line" ] || continue
     IFS="$SEP" read -r count user host port <<< "$line"
     target="${user:+$user@}$host"
-    rows+=("$(printf '%-9s %-42s %s' 'scan' "$target" "$target")")
+    rows+=("$(printf '%s%-9s%s %s%-42s%s %s' \
+      "$C_CYAN" 'scan' "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$target")")
   done < <(scan_candidates)
 
   local managed
@@ -763,7 +823,8 @@ EOF
     [ -n "$alias_" ] || continue
     tgt="$(config_hosts | awk -F'\t' -v a="$alias_" \
       '$1 == a { printf "%s%s", ($3 != "" ? $3 "@" : ""), $2 }')"
-    rows+=("$(printf '%-9s %-42s %s' 'imported' "$alias_  ($tgt)" "$alias_")")
+    rows+=("$(printf '%s%-9s%s %s%-42s%s %s' \
+      "$C_PINK" 'imported' "$C_OFF" "$C_RICE" "$alias_  ($tgt)" "$C_OFF" "$alias_")")
   done <<EOF
 $managed
 EOF
@@ -775,7 +836,7 @@ EOF
 
   local sel
   if have fzf && [ -t 0 ]; then
-    sel="$(printf '%s\n' "${rows[@]}" | sort -u | fzf --multi --height=80% --reverse --border \
+    sel="$(printf '%s\n' "${rows[@]}" | sort -u | FZF --ansi --multi --height=80% --reverse --border \
       --prompt='ignore ❯ ' \
       --header=$'TAB select · ENTER confirm · ESC cancel\nscan = never offer again · imported = also delete its Host stanza' \
       --bind 'ctrl-a:select-all')"
@@ -815,12 +876,19 @@ $alias_"; done
 }
 
 cmd_list() {
-  local rows
+  local rows h a t z
   rows="$(config_hosts)"
   [ -n "$rows" ] || { printf 'No hosts in %s yet — run: sushi scan\n' "$CONFIG"; return 0; }
-  printf '%s\n' "$rows" | sort -f | awk -F'\t' '
-    BEGIN { printf "%-22s %s\n", "ALIAS", "TARGET" }
-    { printf "%-22s %s%s%s\n", $1, ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : "") }'
+  # Colour only when a human is looking; piped or captured output stays plain.
+  if [ -t 1 ]; then h="$C_VIOLET"; a="$C_RICE"; t="$C_DIM"; z="$C_OFF"
+  else h=""; a=""; t=""; z=""; fi
+  printf '%s\n' "$rows" | sort -f \
+    | awk -F'\t' -v h="$h" -v a="$a" -v t="$t" -v z="$z" '
+        BEGIN { printf "%s%-22s %s%s\n", h, "ALIAS", "TARGET", z }
+        {
+          tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
+          printf "%s%-22s%s %s%s%s\n", a, $1, z, t, tgt, z
+        }'
 }
 
 # What fzf shows in the side panel for the highlighted alias.
@@ -828,24 +896,24 @@ cmd_preview() {
   local a="${1:-}" line key val
   [ -n "$a" ] || return 0
 
-  config_hosts | awk -F'\t' -v a="$a" '$1 == a {
-    printf "  %s%s%s\n", ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : "")
+  config_hosts | awk -F'\t' -v a="$a" -v c="$C_ROSE" -v z="$C_OFF" '$1 == a {
+    printf "  %s%s%s%s%s\n", c, ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : ""), z
   }'
 
   if have ssh; then
-    printf '\n  resolved\n'
+    printf '\n  %sresolved%s\n' "$C_VIOLET" "$C_OFF"
     ssh -F "$CONFIG" -G "$a" 2>/dev/null | while read -r key val; do
       case "$key" in
         hostname|user|port|proxyjump|proxycommand|forwardagent|localforward|remoteforward)
           [ "$val" = "none" ] && continue
           [ "$key" = "forwardagent" ] && [ "$val" = "no" ] && continue
-          printf '    %-14s %s\n' "$key" "$val"
+          printf '    %s%-14s%s %s%s%s\n' "$C_DIM" "$key" "$C_OFF" "$C_RICE" "$val" "$C_OFF"
           ;;
         identityfile)
           # only keys that actually exist, so the seven ssh defaults stay hidden
           # shellcheck disable=SC2088  # matching a literal ~ in ssh -G output
           case "$val" in "~/"*) [ -f "$HOME/${val#\~/}" ] || continue ;; *) [ -f "$val" ] || continue ;; esac
-          printf '    %-14s %s\n' "$key" "$val"
+          printf '    %s%-14s%s %s%s%s\n' "$C_DIM" "$key" "$C_OFF" "$C_CYAN" "$val" "$C_OFF"
           ;;
       esac
     done
@@ -854,19 +922,22 @@ cmd_preview() {
   local disp="$CONFIG"
   # shellcheck disable=SC2088  # a literal ~ is what we want to display
   case "$disp" in "$HOME"/*) disp="~/${disp#"$HOME"/}" ;; esac
-  printf '\n  stanza in %s\n' "$disp"
-  flatten_config "$CONFIG" 2>/dev/null | awk -v a="$a" '
+  printf '\n  %sstanza in %s%s\n' "$C_VIOLET" "$disp" "$C_OFF"
+  flatten_config "$CONFIG" 2>/dev/null | awk -v a="$a" -v d="$C_DIM" -v z="$C_OFF" '
     { k = tolower($1) }
-    k == "host" { inb = 0; for (i = 2; i <= NF; i++) if ($i == a) inb = 1; if (inb) { print "    " $0 }; next }
+    k == "host" { inb = 0; for (i = 2; i <= NF; i++) if ($i == a) inb = 1; if (inb) { print "    " d $0 z }; next }
     k == "match" { inb = 0; next }
-    inb && NF { print "    " $0 }'
+    inb && NF { print "    " d $0 z }'
 }
 
 # "alias   user@host:port <TAB> alias" — column 1 is shown, column 2 is the payload
 picker_lines() {
-  config_hosts | sort -f | awk -F'\t' '
-    { printf "%-22s %s%s%s\t%s\n", $1, ($3 != "" ? $3 "@" : ""), $2,
-             ($4 != "22" ? ":" $4 : ""), $1 }'
+  # Colours arrive as -v: single-line values, so onetrueawk is fine with them.
+  config_hosts | sort -f | awk -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
+    {
+      tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
+      printf "%s%-22s%s %s%s%s\t%s\n", a, $1, z, t, tgt, z, $1
+    }'
 }
 
 # Runs fzf and prints the chosen alias on stdout — nothing else goes to stdout,
@@ -885,7 +956,7 @@ run_picker() {
   have fzf || { warn "fzf not found. Install it (brew install fzf) or use: sushi list"; return 1; }
 
   out="$(printf '%s\n' "$lines" \
-    | fzf --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
+    | FZF --ansi --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
         --prompt='ssh ❯ ' --query="${1:-}" \
         --header=$'ENTER connect · ctrl-e edit config · ctrl-r rescan history' \
         --expect=ctrl-e,ctrl-r \
