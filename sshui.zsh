@@ -24,6 +24,11 @@
 #   SSHUI_KEY=^S            key for `key` mode (zsh bindkey syntax)
 #   SSHUI_KEY_ACCEPT=1      run the command immediately instead of leaving it
 #                           on the line for you to edit
+#   SSHUI_EXEC=1            connect from inside the shell function instead of
+#                           putting `ssh <host>` on your prompt. Faster by one
+#                           keypress, but the terminal never sees an `ssh`
+#                           command line — Warp's native SSH block and anything
+#                           else keying off the typed command won't trigger.
 #   SSHUI_BIN=/path/to/sshui   override engine autodetection
 
 # Interactive shells only — scripts and cron must always get the real ssh.
@@ -32,6 +37,7 @@
 : ${SSHUI_MODE:=key,enter}
 : ${SSHUI_KEY:=^S}
 : ${SSHUI_KEY_ACCEPT:=0}
+: ${SSHUI_EXEC:=0}
 
 # --- locate the engine ------------------------------------------------------
 if [[ -z ${SSHUI_BIN:-} ]]; then
@@ -49,10 +55,39 @@ if [[ -z $SSHUI_BIN || ! -x $SSHUI_BIN ]]; then
   print -u2 "sshui.zsh: can't find the sshui script — set SSHUI_BIN=/path/to/sshui"
   return 1
 fi
-typeset -g SSHUI_BIN SSHUI_MODE SSHUI_KEY SSHUI_KEY_ACCEPT
+typeset -g SSHUI_BIN SSHUI_MODE SSHUI_KEY SSHUI_KEY_ACCEPT SSHUI_EXEC
 
-# `sshui scan`, `sshui list`, ... without needing it on $PATH.
-sshui() { "$SSHUI_BIN" "$@" }
+# Hand a picked host back to the shell as a real command line.
+#
+# `print -z` pushes it onto the editor buffer stack, so it appears on your next
+# prompt and you submit it yourself. That matters: terminals with native SSH
+# integration (Warp's session blocks, and anything else keying off the typed
+# command) only see `ssh <host>` if the shell actually runs it as a command.
+# Connecting from inside this function instead makes ssh invisible to them —
+# the terminal saw `sshui`, not `ssh`.
+_sshui_dispatch() {
+  local target=${1-}
+  [[ -n $target ]] || return 0
+  if (( SSHUI_EXEC )); then
+    print -s -r -- "ssh $target"
+    command ssh "$target"
+  else
+    print -z -r -- "ssh $target"
+  fi
+}
+
+# `sshui scan`, `sshui list`, ... without needing it on $PATH. Bare `sshui`
+# (or `sshui <query>`) opens the picker and routes through _sshui_dispatch,
+# rather than letting the script connect on its own.
+sshui() {
+  case ${1-} in
+    scan|list|ls|edit|help|-h|--help|choose|__*)
+      "$SSHUI_BIN" "$@"
+      return $?
+      ;;
+  esac
+  _sshui_dispatch "$("$SSHUI_BIN" choose "${1-}")"
+}
 
 [[ ,$SSHUI_MODE, == *,off,* ]] && return 0
 
@@ -108,11 +143,7 @@ sshui-install-wrapper() {
       command ssh "$@"
       return $?
     fi
-    local target
-    target=$("$SSHUI_BIN" choose) || return 0   # cancelled — leave $? clean
-    [[ -n $target ]] || return 0
-    print -s -- "ssh $target"                   # so ↑ repeats it, and scan sees it
-    command ssh "$target"
+    _sshui_dispatch "$("$SSHUI_BIN" choose)"
   }
 }
 

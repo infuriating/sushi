@@ -431,6 +431,35 @@ if command -v zsh >/dev/null 2>&1; then
   out="$(HOME="$H" zsh -c "SSHUI_MODE=wrap; source '$Z'; whence -w ssh" 2>&1 | tail -1)"
   assert_eq "non-interactive zsh never loads the integration" "ssh: command" "$out"
 
+  section "zsh integration: handing the host back to the shell"
+
+  # A terminal with native SSH integration (Warp) only recognises a session if
+  # the shell runs a literal `ssh <host>` command line. So by default the picked
+  # host is pushed onto the next prompt with `print -z`, and the shell function
+  # must NOT connect on its own.
+  STUB="$WORK/stubbin"
+  mkdir -p "$STUB"
+  printf '#!/bin/sh\necho "STUBSSH $*"\n' > "$STUB/ssh"
+  chmod +x "$STUB/ssh"
+
+  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sshui_dispatch myhost" 2>&1)"
+  assert_lacks "by default the function does not connect itself" "STUBSSH" "$out"
+
+  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "SSHUI_EXEC=1; source '$Z'; _sshui_dispatch myhost" 2>&1)"
+  assert_has "SSHUI_EXEC=1 connects immediately instead" "STUBSSH myhost" "$out"
+
+  out="$(HOME="$H" PATH="$STUB:$PATH" zsh -ic "source '$Z'; _sshui_dispatch ''" 2>&1)"
+  assert_lacks "an empty pick is a no-op" "STUBSSH" "$out"
+
+  assert_eq "SSHUI_EXEC defaults to off" "0" "$(zprobe key 'print $SSHUI_EXEC')"
+
+  # subcommands must still reach the engine untouched
+  assert_has "sshui list reaches the engine"  "zhost"       "$(zprobe key 'sshui list')"
+  assert_has "sshui help reaches the engine"  "fuzzy SSH"   "$(zprobe key 'sshui help 2>&1 | head -1')"
+  assert_has "sshui scan -n reaches the engine" "Nothing new found" \
+             "$(zprobe key 'sshui scan -n 2>&1 | tail -1')"
+  assert_has "the dispatcher exists even in off mode" "0" "$(zprobe off 'print $SSHUI_EXEC')"
+
   section "zsh integration: mode key"
   assert_eq "leaves ssh a real command"  "ssh: command"       "$(zprobe key 'whence -w ssh')"
   assert_has "binds the key"             "sshui-insert-host"  "$(zprobe key "bindkey '^S'")"
@@ -474,7 +503,7 @@ printf '# pre-existing\nexport KEEP=1\n' > "$IH/.zshrc"
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
 zshrc="$(cat "$IH/.zshrc")"
 assert_has "keeps pre-existing .zshrc content" "export KEEP=1" "$zshrc"
-assert_has "writes the mode explicitly"        "SSHUI_MODE=key,enter" "$zshrc"
+assert_has "writes the mode explicitly"        "SSHUI_MODE:=key,enter" "$zshrc"
 assert_has "sources the integration"           "sshui.zsh" "$zshrc"
 
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
@@ -482,12 +511,24 @@ n="$(grep -c 'sshui.zsh' "$IH/.zshrc")"
 assert_eq "re-running does not duplicate the block" "1" "$n"
 
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --mode=wrap >/dev/null 2>&1
-assert_has "switching mode rewrites the block" "SSHUI_MODE=wrap" "$(cat "$IH/.zshrc")"
+assert_has "switching mode rewrites the block" "SSHUI_MODE:=wrap" "$(cat "$IH/.zshrc")"
 n="$(grep -c 'sshui.zsh' "$IH/.zshrc")"
 assert_eq "switching mode leaves one block" "1" "$n"
 
 HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --key='^G' >/dev/null 2>&1
-assert_has "honours --key" "SSHUI_KEY='^G'" "$(cat "$IH/.zshrc")"
+assert_has "honours --key" "SSHUI_KEY:='^G'" "$(cat "$IH/.zshrc")"
+
+# the written block must not clobber an exported value, so that
+# `SSHUI_MODE=off zsh -i` gives you a throwaway shell with sshui disabled
+if command -v zsh >/dev/null 2>&1; then
+  HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --mode=enter >/dev/null 2>&1
+  out="$(HOME="$IH" zsh -ic 'print $SSHUI_MODE' 2>/dev/null | tail -1)"
+  assert_eq "the .zshrc block applies its mode"  "enter" "$out"
+  out="$(HOME="$IH" SSHUI_MODE=off zsh -ic 'print $SSHUI_MODE' 2>/dev/null | tail -1)"
+  assert_eq "an exported SSHUI_MODE overrides it" "off" "$out"
+  out="$(HOME="$IH" SSHUI_MODE=wrap zsh -ic 'whence -w ssh' 2>/dev/null | tail -1)"
+  assert_eq "and the override actually takes effect" "ssh: function" "$out"
+fi
 
 if HOME="$IH" "$ROOT/install.sh" --mode=nonsense >/dev/null 2>&1; then
   no "an unrecognised --mode exits non-zero"

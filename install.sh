@@ -128,10 +128,13 @@ else
   info "added a sshui block to $ZSHRC"
 fi
 
+# `: ${VAR:=x}` rather than `VAR=x`, so an exported value wins — that makes
+#   SSHUI_MODE=off zsh -i
+# a throwaway shell with the integration disabled, without editing anything.
 {
   printf '%s\n' "$BEGIN"
-  printf '%s\n' "SSHUI_MODE=$MODE          # key | enter | wrap | off  (comma-separated)"
-  printf "%s\n" "SSHUI_KEY='$KEY'"
+  printf '%s\n' ": \${SSHUI_MODE:=$MODE}      # key | enter | wrap | off  (comma-separated)"
+  printf '%s\n' ": \${SSHUI_KEY:='$KEY'}"
   printf '%s\n' "source \"$HERE/sshui.zsh\""
   printf '%s\n' "$END"
 } >> "$ZSHRC"

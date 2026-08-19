@@ -98,8 +98,27 @@ you'd rather it run immediately instead of leaving the line for you to edit.
 ```
 
 All modes load only in interactive shells, so scripts, cron jobs and anything calling
-`/usr/bin/ssh` directly are unaffected. In every mode the command that actually runs is a real
-`ssh <host>`, pushed into your shell history — so `↑` repeats it and the next `scan` sees it.
+`/usr/bin/ssh` directly are unaffected.
+
+### Terminals with native SSH integration
+
+Warp — and anything else that gives ssh sessions special treatment — recognises a session by the
+**literal command line the shell runs**. A picker that connects on your behalf is invisible to it:
+the terminal saw `sshui`, not `ssh`. You lose the session chip, the remote directory indicator, and
+block-level integration.
+
+So sshui never connects for you. Every mode ends with a real `ssh <host>` command line submitted
+from your prompt:
+
+- `key` inserts it into the line you're editing; you press ENTER
+- `enter` rewrites the buffer to `ssh <host>` immediately before it runs
+- bare `sshui` (and `sshui <query>`) pushes it onto your **next** prompt via zsh's `print -z`, so
+  you press ENTER once more and the terminal sees a command you typed
+
+That last ENTER is the price of native integration. If you'd rather skip it and connect straight
+away, `SSHUI_EXEC=1` — with the understanding that Warp-style session detection then won't fire.
+
+Either way the command lands in your shell history, so `↑` repeats it and the next `scan` sees it.
 
 ## Where the hosts come from
 
