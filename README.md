@@ -40,8 +40,8 @@ The picker is a convenience on top; the config is the deliverable.
 ## Install
 
 ```bash
-git clone https://github.com/YOUR-NAME/sshui.git ~/src/sshui
-cd ~/src/sshui
+git clone https://github.com/infuriating/sshui.git ~/sshui
+cd ~/sshui
 ./install.sh
 exec zsh
 ```
@@ -61,32 +61,45 @@ ssh               # the picker
 ssh staging       # untouched — goes straight to the real ssh
 ```
 
-Inside the picker: type to filter, `ENTER` to connect, `ctrl-e` to edit `~/.ssh/config`,
-`ctrl-r` to rescan history. The chosen command is pushed into your shell history, so `↑` repeats
-it and the next `scan` sees it.
+…where `ssh` on its own opens the picker in the default mode. Inside it: type to filter, `ENTER` to
+connect, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan history.
 
 Other commands: `sshui list` prints the host table, `sshui edit` opens the config,
 `sshui choose` prints an alias instead of connecting (useful for your own scripts).
 
-### How bare `ssh` is intercepted
+### Shell integration modes
 
-`sshui.zsh` defines a zsh function named `ssh`:
+How the picker is reached is configurable, because the obvious approach — defining a shell
+function called `ssh` — has a real cost. Terminals that ship their own `ssh` completion (Warp, and
+anything Fig-derived) key off the `ssh` command word, and shadowing it with a function turns that
+completion off. So that mode exists, but it isn't the default.
 
-```zsh
-ssh() {
-  if (( $# > 0 )) || [[ ! -t 1 ]]; then
-    command ssh "$@"          # any argument at all: not our business
-    return $?
-  fi
-  ...                         # no arguments: open the picker
-}
+| `SSHUI_MODE` | How you open the picker | Shadows `ssh`? |
+| --- | --- | --- |
+| `key` | a keybinding, `^S` by default | no |
+| `enter` | press ENTER on a line containing only `ssh` | no |
+| `wrap` | run `ssh` with no arguments | **yes** |
+| `off` | only the `sshui` command | no |
+
+Default is `key,enter` — combine any of them with commas.
+
+`enter` is the interesting one: it rebinds zsh's `accept-line` widget, so a buffer of exactly `ssh`
+gets rewritten to `ssh <picked-host>` a moment before it runs. You get the same "just type ssh"
+feel as `wrap`, but `ssh` stays a real command, so native completion keeps working.
+
+`key` inserts at the cursor rather than replacing the line, which makes it useful beyond ssh —
+type `scp report.pdf ` then hit `^S` and you get the host appended. Set `SSHUI_KEY_ACCEPT=1` if
+you'd rather it run immediately instead of leaving the line for you to edit.
+
+```bash
+./install.sh --mode=enter        # switch modes any time; rewrites the ~/.zshrc block
+./install.sh --mode=key --key='^G'
+./install.sh --mode=off
 ```
 
-It only loads in interactive shells, so scripts, cron jobs and anything running
-`/usr/bin/ssh` directly are unaffected. Argument-less `ssh` previously just printed a usage
-message, so nothing useful is being shadowed. If you would rather not wrap `ssh` at all, the
-bottom of `sshui.zsh` has a commented-out `ctrl-s` widget that inserts an alias onto your
-command line instead.
+All modes load only in interactive shells, so scripts, cron jobs and anything calling
+`/usr/bin/ssh` directly are unaffected. In every mode the command that actually runs is a real
+`ssh <host>`, pushed into your shell history — so `↑` repeats it and the next `scan` sees it.
 
 ## Where the hosts come from
 
@@ -135,22 +148,25 @@ Everything sshui writes goes inside a marked block:
   alias, a `ProxyJump`, or a wrapper script won't be found.
 - Bare IPv6 literals (`ssh 2001:db8::1`) are skipped — indistinguishable from `host:port` without
   guessing.
-- The `ssh` wrapper is zsh-only. bash and fish users can still use `sshui` as a command.
+- The shell integration is zsh-only. bash and fish users can still use `sshui` as a command.
+- `SSHUI_MODE=wrap` disables terminal-native `ssh` completion, as described above. Use `enter`.
+- `^S` is XOFF under legacy terminal flow control; `key` mode runs `stty -ixon` when that is the
+  chosen key. Pass `--key='^G'` if you'd rather it left your tty settings alone.
 - Generated aliases are a best guess (first DNS label, or `srv-10-0-0-5` for an IP). Rename them —
   edits inside the managed block survive.
 
 ## Tests
 
 ```bash
-./test/run.sh        # 80-odd assertions, no fzf or terminal needed
+./test/run.sh        # 110-odd assertions, no fzf or terminal needed
 ./test/run.sh -v     # show every assertion
 ```
 
-The suite builds throwaway `$HOME`s and checks the awkward parts: odd history lines, glob safety,
-port collapsing, hashed `known_hosts`, alias collisions, managed-block ordering, idempotency,
-refusal to write an unparseable config, and the zsh wrapper's behaviour in interactive vs
-non-interactive shells. CI runs it on Linux and macOS — the macOS job exercises bash 3.2, which is
-what ships with the OS.
+The suite builds throwaway `$HOME`s and `.zshrc`s and checks the awkward parts: odd history lines,
+glob safety, port collapsing, hashed `known_hosts`, alias collisions, managed-block ordering,
+idempotency, refusal to write an unparseable config, what each `SSHUI_MODE` does and does not
+touch, and `install.sh` being idempotent and fully reversible. CI runs it on Linux and macOS — the
+macOS job exercises bash 3.2, which is what ships with the OS.
 
 ## Licence
 

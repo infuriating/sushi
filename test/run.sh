@@ -417,24 +417,93 @@ if command -v zsh >/dev/null 2>&1; then
   printf 'Host zhost\n    HostName z.example.com\n' > "$H/.ssh/config"
   Z="$ROOT/sshui.zsh"
 
-  out="$(HOME="$H" zsh -ic "source '$Z'; whence -w ssh" 2>&1 | tail -1)"
-  assert_eq "interactive zsh wraps ssh in a function" "ssh: function" "$out"
+  # zprobe <mode> <zsh snippet> -> last line of output
+  zprobe() {
+    HOME="$H" zsh -ic "SSHUI_MODE='$1'; source '$Z'; $2" 2>&1 | tail -1
+  }
 
-  out="$(HOME="$H" zsh -c "source '$Z'; whence -w ssh" 2>&1 | tail -1)"
-  assert_eq "non-interactive zsh leaves ssh alone" "ssh: command" "$out"
+  assert_eq "engine is found next to sshui.zsh"  "$SSHUI" "$(zprobe key 'echo $SSHUI_BIN')"
+  assert_has "sshui works as a shell function, off PATH" "zhost" "$(zprobe key 'sshui list')"
 
-  out="$(HOME="$H" zsh -ic "source '$Z'; echo \$SSHUI_BIN" 2>&1 | tail -1)"
-  assert_eq "engine is found next to sshui.zsh" "$SSHUI" "$out"
+  out="$(HOME="$H" zsh -ic "source '$Z'; echo \$SSHUI_MODE" 2>&1 | tail -1)"
+  assert_eq "default mode does not shadow ssh" "key,enter" "$out"
 
-  out="$(HOME="$H" zsh -ic "source '$Z'; sshui list" 2>&1)"
-  assert_has "sshui works as a shell function, off PATH" "zhost" "$out"
+  out="$(HOME="$H" zsh -c "SSHUI_MODE=wrap; source '$Z'; whence -w ssh" 2>&1 | tail -1)"
+  assert_eq "non-interactive zsh never loads the integration" "ssh: command" "$out"
 
-  # with arguments, the wrapper must not intercept
-  out="$(HOME="$H" zsh -ic "source '$Z'; ssh -V" 2>&1)"
-  assert_has "ssh with arguments reaches the real binary" "OpenSSH" "$out"
+  section "zsh integration: mode key"
+  assert_eq "leaves ssh a real command"  "ssh: command"       "$(zprobe key 'whence -w ssh')"
+  assert_has "binds the key"             "sshui-insert-host"  "$(zprobe key "bindkey '^S'")"
+  assert_lacks "does not touch accept-line" "sshui-accept-line" "$(zprobe key 'zle -l | grep accept-line')"
+  out="$(HOME="$H" zsh -ic "SSHUI_MODE=key; SSHUI_KEY='^G'; source '$Z'; bindkey '^G'" 2>&1 | tail -1)"
+  assert_has "honours a custom SSHUI_KEY" "sshui-insert-host" "$out"
+
+  section "zsh integration: mode enter"
+  assert_eq "leaves ssh a real command"  "ssh: command"  "$(zprobe enter 'whence -w ssh')"
+  assert_has "rebinds accept-line"       "accept-line (sshui-accept-line)" \
+                                         "$(zprobe enter 'zle -l | grep accept-line')"
+  assert_lacks "does not bind a key"     "sshui-insert-host" "$(zprobe enter "bindkey '^S'")"
+
+  section "zsh integration: mode wrap"
+  assert_eq "shadows ssh with a function" "ssh: function" "$(zprobe wrap 'whence -w ssh')"
+  assert_has "ssh with arguments still reaches the real binary" "OpenSSH" "$(zprobe wrap 'ssh -V')"
+  assert_lacks "does not bind a key"      "sshui-insert-host" "$(zprobe wrap "bindkey '^S'")"
+
+  section "zsh integration: mode off / invalid"
+  assert_eq "off leaves ssh alone"        "ssh: command"      "$(zprobe off 'whence -w ssh')"
+  assert_lacks "off binds nothing"        "sshui-insert-host" "$(zprobe off "bindkey '^S'")"
+  assert_has "off still provides the sshui function" "zhost"  "$(zprobe off 'sshui list')"
+  assert_has "an unrecognised mode warns" "matched nothing"   "$(zprobe bogus 'true')"
+
+  section "zsh integration: combined modes"
+  assert_has "key,enter binds the key"      "sshui-insert-host" "$(zprobe key,enter "bindkey '^S'")"
+  assert_has "key,enter rebinds accept-line" "sshui-accept-line" \
+                                             "$(zprobe key,enter 'zle -l | grep accept-line')"
+  assert_eq  "key,enter leaves ssh a real command" "ssh: command" "$(zprobe key,enter 'whence -w ssh')"
 else
   skip "zsh integration" "zsh not installed"
 fi
+
+# --------------------------------------------------------------------------
+section "install.sh"
+
+IH="$WORK/installhome"
+rm -rf "$IH"; mkdir -p "$IH/.ssh"
+printf '# pre-existing\nexport KEEP=1\n' > "$IH/.zshrc"
+
+HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
+zshrc="$(cat "$IH/.zshrc")"
+assert_has "keeps pre-existing .zshrc content" "export KEEP=1" "$zshrc"
+assert_has "writes the mode explicitly"        "SSHUI_MODE=key,enter" "$zshrc"
+assert_has "sources the integration"           "sshui.zsh" "$zshrc"
+
+HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" >/dev/null 2>&1
+n="$(grep -c 'sshui.zsh' "$IH/.zshrc")"
+assert_eq "re-running does not duplicate the block" "1" "$n"
+
+HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --mode=wrap >/dev/null 2>&1
+assert_has "switching mode rewrites the block" "SSHUI_MODE=wrap" "$(cat "$IH/.zshrc")"
+n="$(grep -c 'sshui.zsh' "$IH/.zshrc")"
+assert_eq "switching mode leaves one block" "1" "$n"
+
+HOME="$IH" SHELL=/bin/zsh "$ROOT/install.sh" --key='^G' >/dev/null 2>&1
+assert_has "honours --key" "SSHUI_KEY='^G'" "$(cat "$IH/.zshrc")"
+
+if HOME="$IH" "$ROOT/install.sh" --mode=nonsense >/dev/null 2>&1; then
+  no "an unrecognised --mode exits non-zero"
+else
+  ok "an unrecognised --mode exits non-zero"
+fi
+
+out="$(HOME="$IH" SHELL=/bin/zsh TERM_PROGRAM=WarpTerminal "$ROOT/install.sh" --mode=wrap 2>&1)"
+assert_has "warns that wrap breaks Warp's completion" "shadows the ssh" "$out"
+out="$(HOME="$IH" SHELL=/bin/zsh TERM_PROGRAM=WarpTerminal "$ROOT/install.sh" --mode=enter 2>&1)"
+assert_lacks "stays quiet about Warp in enter mode" "shadows the ssh" "$out"
+
+HOME="$IH" "$ROOT/install.sh" --uninstall >/dev/null 2>&1
+zshrc="$(cat "$IH/.zshrc")"
+assert_has   "uninstall keeps your content" "export KEEP=1" "$zshrc"
+assert_lacks "uninstall removes everything sshui added" "sshui" "$zshrc"
 
 # --------------------------------------------------------------------------
 printf '\n'
