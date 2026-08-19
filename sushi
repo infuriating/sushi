@@ -915,7 +915,7 @@ EOF
 
   local sel
   if have fzf && [ -t 0 ]; then
-    sel="$(printf '%s\n' "$rows" | sort -u | FZF --ansi --multi --height=80% --reverse --border \
+    sel="$(printf '%s\n' "$rows" | FZF --ansi --multi --height=80% --reverse --border \
       --prompt='ignore ❯ ' \
       --header=$'TAB select · ENTER confirm · ESC cancel\nscan = never offer again · imported = also delete its Host stanza' \
       --bind 'ctrl-a:select-all')"
