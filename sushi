@@ -357,18 +357,34 @@ ignore_entries() {
   sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' "$IGNORE" | grep -v '^$'
 }
 
+# The ignore list is read once per process, not once per candidate. It used to
+# re-run `ignore_entries` (a sed|grep pipeline) for every row, which is two
+# subprocesses per candidate and was a large part of the scan picker's latency.
+IGNORE_LOADED=0
+IGNORE_PATS=""
+ignore_invalidate() { IGNORE_LOADED=0; }
+
 # is_ignored <user> <host> — patterns match `user@host` or the bare host, glob-style
 is_ignored() {
-  local user="$1" host="$2" pat
-  while IFS= read -r pat; do
-    [ -n "$pat" ] || continue
+  local user="$1" host="$2" pat reglob=0
+  if [ "$IGNORE_LOADED" = 0 ]; then
+    IGNORE_PATS="$(ignore_entries)"
+    IGNORE_LOADED=1
+  fi
+  [ -n "$IGNORE_PATS" ] || return 1
+
+  # split on newlines only, and with globbing off — the entries ARE globs and
+  # must not expand against the filesystem before `case` sees them
+  local IFS='
+'
+  case $- in *f*) ;; *) reglob=1; set -f ;; esac
+  for pat in $IGNORE_PATS; do
     # shellcheck disable=SC2254  # unquoted on purpose: entries are glob patterns
-    case "$user@$host" in $pat) return 0 ;; esac
+    case "$user@$host" in $pat) [ "$reglob" = 1 ] && set +f; return 0 ;; esac
     # shellcheck disable=SC2254
-    case "$host" in $pat) return 0 ;; esac
-  done <<EOF
-$(ignore_entries)
-EOF
+    case "$host" in $pat) [ "$reglob" = 1 ] && set +f; return 0 ;; esac
+  done
+  [ "$reglob" = 1 ] && set +f
   return 1
 }
 
@@ -400,6 +416,7 @@ $pat"
     added=$((added + 1))
   done
   [ "$added" -gt 0 ] && printf '\nWrote %s\n' "$IGNORE"
+  ignore_invalidate
   return 0
 }
 
@@ -427,36 +444,50 @@ ignore_remove() {
 # list is NOT applied here — callers filter, because this runs in a subshell
 # (process substitution) and a count set in here would never reach the caller.
 scan_candidates() {
-  local cfg known_pairs known_aliases known_names
+  local cfg
   cfg="$(config_hosts)"
-  known_pairs="$(printf '%s\n'   "$cfg" | awk -F'\t' '{ print tolower($2) "|" tolower($3) }')"
-  known_aliases="$(printf '%s\n' "$cfg" | awk -F'\t' '{ print tolower($1) }')"
-  known_names="$(printf '%s\n'   "$cfg" | awk -F'\t' '{ print tolower($2) }')"
-
-  local count user host port key hostlc seen_hosts=""
-  while IFS="$SEP" read -r count user host port; do
-    [ -n "${host:-}" ] || continue
-    case "$host" in localhost|127.0.0.1|::1|0.0.0.0) continue ;; esac
-    hostlc="$(printf '%s' "$host" | tr 'A-Z' 'a-z')"
-    key="$hostlc|$(printf '%s' "$user" | tr 'A-Z' 'a-z')"
-    printf '%s\n' "$known_pairs"   | grep -Fxq "$key"    && continue
-    printf '%s\n' "$known_aliases" | grep -Fxq "$hostlc" && continue
-    printf '%s\n' "$count$SEP$user$SEP$host$SEP$port"
-    seen_hosts="$seen_hosts
-$hostlc"
-  done < <(scan_history)
-
-  # known_hosts: hosts you have connected to, but it never records a username
-  # (and hashed `|1|...` entries are unrecoverable by design, so they're skipped).
-  while IFS= read -r host; do
-    [ -n "${host:-}" ] || continue
-    case "$host" in localhost|127.0.0.1|::1|0.0.0.0) continue ;; esac
-    hostlc="$(printf '%s' "$host" | tr 'A-Z' 'a-z')"
-    printf '%s\n' "$known_names"   | grep -Fxq "$hostlc" && continue
-    printf '%s\n' "$known_aliases" | grep -Fxq "$hostlc" && continue
-    printf '%s\n' "$seen_hosts"    | grep -Fxq "$hostlc" && continue
-    printf '%s\n' "0$SEP$SEP$host$SEP"
-  done < <(scan_known_hosts)
+  # One awk for all of it. This used to be two bash loops calling tr and
+  # `grep -Fxq` per candidate — six subprocesses a row, which dominated the
+  # scan picker's reload time.
+  { scan_history; printf '%s\n' '@@SUSHI_KNOWN_HOSTS@@'; scan_known_hosts; } \
+    | awk -v cfg="$cfg" '
+      function boring(h) {
+        return (h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0")
+      }
+      BEGIN {
+        FS = "|"
+        n = split(cfg, L, "\n")
+        for (i = 1; i <= n; i++) {
+          if (L[i] == "") continue
+          split(L[i], f, "\t")
+          alias[tolower(f[1])] = 1
+          name[tolower(f[2])] = 1
+          pair[tolower(f[2]) SUBSEP tolower(f[3])] = 1
+        }
+        mode = 1
+      }
+      $0 == "@@SUSHI_KNOWN_HOSTS@@" { mode = 2; next }
+      mode == 1 {
+        user = $2; host = $3
+        if (host == "") next
+        h = tolower(host)
+        if (boring(h)) next
+        if ((h SUBSEP tolower(user)) in pair) next   # same user@host already configured
+        if (h in alias) next                         # you ssh to it by alias already
+        print $0
+        seen[h] = 1
+        next
+      }
+      # known_hosts: bare hostnames, no username recorded, hashed entries already
+      # dropped upstream
+      mode == 2 {
+        host = $1
+        if (host == "") next
+        h = tolower(host)
+        if (boring(h) || h in name || h in alias || h in seen) next
+        print "0||" host "|"
+      }
+    '
 }
 
 # Turn candidate records on stdin into the scan picker's fzf input: three
@@ -471,35 +502,79 @@ menu_from_candidates() {
     IFS="$SEP" read -r count user host port <<< "$line"
     [ -n "${host:-}" ] || continue
     is_ignored "$user" "$host" && continue
+    # One printf per row, no command substitution: this runs for every row on
+    # every reload, and `$( )` here cost two forks a row.
     if [ "$count" = "0" ]; then
-      printf '%s\t%s\t%s\n' \
-        "$(printf '%11s  %s%s' 'known_hosts' "$host" "${port:+:$port}")" "$line" "$host"
+      printf '%11s  %s%s\t%s\t%s\n' \
+        'known_hosts' "$host" "${port:+:$port}" "$line" "$host"
     else
-      printf '%s\t%s\t%s\n' \
-        "$(printf '%10sx  %s%s%s' "$count" "${user:+$user@}" "$host" "${port:+:$port}")" \
-        "$line" "${user:+$user@}$host"
+      printf '%10sx  %s%s%s\t%s\t%s\n' \
+        "$count" "${user:+$user@}" "$host" "${port:+:$port}" "$line" "${user:+$user@}$host"
     fi
   done
 }
 
-# Used by `sushi __scanmenu`, which fzf calls to reload after ctrl-x.
 scan_menu() { scan_candidates | menu_from_candidates; }
+
+# ---- the scan picker's live state -------------------------------------------
+#
+# ctrl-x used to run `sushi ignore` and then reload by re-scanning from scratch:
+# every keypress re-parsed every history file and rewrote the ignore file. That
+# is ~900ms a press on a 3000-line history, so dismissing a handful of hosts felt
+# broken.
+#
+# Instead the candidate list is scanned once into SUSHI_SCAN_CACHE, and ctrl-x
+# only appends a pattern to SUSHI_SCAN_PENDING. The reload re-reads the cache
+# minus the pending lines — no history parse, no config parse, no write. The
+# pending patterns are flushed to the ignore file once, after the picker exits.
+
+# Trap-visible: an EXIT trap runs after cmd_scan has returned, so `local`
+# variables are gone by then — with `set -u` the trap itself then fails.
+SCAN_CACHE=""
+SCAN_PENDING=""
+cleanup_scan() {
+  [ -n "$SCAN_CACHE" ] && rm -f "$SCAN_CACHE"
+  [ -n "$SCAN_PENDING" ] && rm -f "$SCAN_PENDING"
+  return 0
+}
+
+pend_add() {
+  local p
+  [ -n "${SUSHI_SCAN_PENDING:-}" ] || return 0
+  for p in "$@"; do
+    [ -n "$p" ] && printf '%s\n' "$p" >> "$SUSHI_SCAN_PENDING"
+  done
+  return 0
+}
+
+menu_from_cache() {
+  [ -n "${SUSHI_SCAN_CACHE:-}" ] && [ -r "$SUSHI_SCAN_CACHE" ] || return 0
+  menu_from_candidates < "$SUSHI_SCAN_CACHE" \
+    | awk -F'\t' -v pf="${SUSHI_SCAN_PENDING:-/dev/null}" '
+        BEGIN { while ((getline l < pf) > 0) if (l != "") gone[l] = 1 }
+        !($3 in gone)'
+}
 
 cmd_scan() {
   local dry=0
   [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ] && dry=1
 
+  local cache pending
+  cache="$(mktemp "${TMPDIR:-/tmp}/sushi-scan.XXXXXX")" || die "mktemp failed"
+  pending="$(mktemp "${TMPDIR:-/tmp}/sushi-pend.XXXXXX")" || die "mktemp failed"
+  SCAN_CACHE="$cache"; SCAN_PENDING="$pending"
+  trap cleanup_scan EXIT
+  export SUSHI_SCAN_CACHE="$cache" SUSHI_SCAN_PENDING="$pending"
+
   # one pass over the history; the menu and the hidden tally both come from it
-  local all menu selected count user host port hidden=0
-  all="$(scan_candidates)"
-  menu="$(printf '%s\n' "$all" | menu_from_candidates)"
+  local menu selected count user host port hidden=0
+  scan_candidates > "$cache"
+  menu="$(menu_from_candidates < "$cache")"
 
   while IFS="$SEP" read -r count user host port; do
     [ -n "${host:-}" ] || continue
     is_ignored "$user" "$host" && hidden=$((hidden + 1))
-  done <<EOF
-$all
-EOF
+  done < "$cache"
 
   local hidden_note=""
   [ "$hidden" -gt 0 ] && hidden_note=" · $hidden hidden by the ignore list"
@@ -517,16 +592,33 @@ EOF
       [ -t 0 ] || warn "no terminal for interactive selection — importing everything"
     fi
   else
-    # ctrl-x adds the highlighted (or tab-selected) rows to the ignore list and
-    # reloads, so they vanish from the list here and from every future scan.
+    # ctrl-x only notes the pattern and redraws from the cache; the ignore file is
+    # written once, below, after the picker closes.
     selected="$(printf '%s\n' "$menu" | fzf --multi --delimiter='\t' --with-nth=1 \
       --height=80% --reverse --border --prompt='import ❯ ' \
       --header="TAB select · ctrl-a all · ENTER import · ctrl-x never show again · ESC cancel
 sorted by how often you used them$hidden_note" \
       --bind 'ctrl-a:select-all' \
-      --bind "ctrl-x:execute-silent('$SELF' ignore {+3})+reload('$SELF' __scanmenu)" \
+      --bind "ctrl-x:execute-silent('$SELF' __pend {+3})+reload('$SELF' __menucache)" \
       | cut -f2)"
-    [ -n "$selected" ] || { printf 'Nothing selected.\n'; return 0; }
+  fi
+
+  # ---- flush whatever ctrl-x dismissed, whether or not anything was imported
+  if [ -s "$pending" ]; then
+    local -a pats=()
+    local p
+    while IFS= read -r p; do
+      [ -n "$p" ] && pats+=("$p")
+    done < "$pending"
+    if [ "${#pats[@]}" -gt 0 ]; then
+      printf '\n'
+      ignore_add "${pats[@]}"
+    fi
+  fi
+
+  if [ -z "$selected" ]; then
+    [ -s "$pending" ] || printf 'Nothing selected.\n'
+    return 0
   fi
 
   # ---- build stanzas with collision-free aliases
@@ -829,6 +921,8 @@ $a"; done
   __lines)           picker_lines ;;             # internal: what fzf is fed
   __subcommands)     printf '%s\n' "$SUBCOMMANDS" | tr ' ' '\n' ;;
   __scanmenu)        scan_menu ;;                # internal: scan picker's fzf input
+  __menucache)       menu_from_cache ;;          # internal: reload from the cache
+  __pend)            shift; pend_add "$@" ;;     # internal: note a ctrl-x dismissal
   __candidates)      scan_history ;;             # internal: raw history scan
   edit)              exec "${EDITOR:-vi}" "$CONFIG" ;;
   help|-h|--help)    usage ;;

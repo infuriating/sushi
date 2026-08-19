@@ -89,9 +89,14 @@ sushi ignore --edit       # open the file in $EDITOR
 ```
 
 You can also dismiss rows without leaving `scan`: highlight one (or `TAB` several) and press
-**`ctrl-x`**. They're added to the ignore list and the list reloads, so they disappear on the spot
-and never come back. Nothing is imported and `~/.ssh/config` isn't touched — it's purely "stop
-showing me this".
+**`ctrl-x`**. They vanish immediately and never come back. Nothing is imported and `~/.ssh/config`
+isn't touched — it's purely "stop showing me this".
+
+`ctrl-x` is deliberately cheap. The candidate list is scanned once into a temp cache when the picker
+opens; a keypress only appends a pattern to a pending file, and the redraw re-reads the cache minus
+that file. The ignore list itself is written once, after the picker closes, however many rows you
+dismissed. Doing the obvious thing instead — write the ignore file, then reload by re-scanning —
+cost ~900ms per keypress on a 3000-line history; this is ~30ms.
 
 `sushi delete` is the standalone version, and its picker offers two kinds of entry:
 

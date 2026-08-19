@@ -462,6 +462,61 @@ assert_has   "and leaves the rest"               "three.example.com" "$menu"
 # dismissing must not import anything
 assert_has "nothing was written to the config" "No hosts in" "$(run "$H" list)"
 
+# ---- the cache/pending layer that keeps ctrl-x responsive -------------------
+# ctrl-x must not re-scan: it appends to a pending file and the reload re-reads a
+# cache. Re-scanning per keypress cost ~900ms on a 3000-line history.
+H="$(newhome cache)"
+printf ': 1:0;ssh a@one.example.com\n: 2:0;ssh b@two.example.com\n: 3:0;ssh c@three.example.com\n' \
+  > "$H/.zsh_history"
+
+CACHE="$WORK/scan.cache"
+PEND="$WORK/scan.pend"
+run "$H" __candidates > /dev/null            # sanity: history parses
+"$SUSHI" __scanmenu > /dev/null 2>&1 || true  # no cache set: must not blow up
+
+# with no cache configured, the reload path is a no-op rather than an error
+out="$(HOME="$H" "$SUSHI" __menucache 2>&1)"
+assert_eq "reload without a cache is silent" "" "$out"
+
+# build a cache the way cmd_scan does, then drive the reload path directly
+HOME="$H" SUSHI_SCAN_CACHE="$CACHE" "$SUSHI" __scanmenu | cut -f2 > "$CACHE"
+: > "$PEND"
+menu="$(HOME="$H" SUSHI_SCAN_CACHE="$CACHE" SUSHI_SCAN_PENDING="$PEND" "$SUSHI" __menucache)"
+n="$(printf '%s\n' "$menu" | wc -l | tr -d ' ')"
+assert_eq "the cached reload lists every candidate" "3" "$n"
+
+pat="$(printf '%s\n' "$menu" | grep two | cut -f3)"
+HOME="$H" SUSHI_SCAN_PENDING="$PEND" "$SUSHI" __pend "$pat"
+assert_has "__pend records the pattern" "$pat" "$(cat "$PEND")"
+
+menu="$(HOME="$H" SUSHI_SCAN_CACHE="$CACHE" SUSHI_SCAN_PENDING="$PEND" "$SUSHI" __menucache)"
+assert_lacks "the reload drops a pending row"   "two.example.com"   "$menu"
+assert_has   "and keeps the others"             "one.example.com"   "$menu"
+n="$(printf '%s\n' "$menu" | wc -l | tr -d ' ')"
+assert_eq "exactly one row went away" "2" "$n"
+
+# crucially, pending is NOT the ignore file: nothing is written until the flush
+assert_lacks "pending dismissals are not yet persisted" "two.example.com" \
+             "$(run "$H" ignore --list)"
+assert_has   "so a fresh scan still offers them"        "two.example.com" \
+             "$(run "$H" scan -n)"
+
+# multi-select passes several patterns in one go, as fzf's {+3} does
+HOME="$H" SUSHI_SCAN_PENDING="$PEND" "$SUSHI" __pend "a@one.example.com" "c@three.example.com"
+menu="$(HOME="$H" SUSHI_SCAN_CACHE="$CACHE" SUSHI_SCAN_PENDING="$PEND" "$SUSHI" __menucache)"
+assert_eq "all pending rows are dropped" "" "$menu"
+
+# a scan run must not leave its temp files behind
+before="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'sushi-scan.*' -o -maxdepth 1 -name 'sushi-pend.*' 2>/dev/null | wc -l | tr -d ' ')"
+run "$H" scan -n > /dev/null
+after="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'sushi-scan.*' -o -maxdepth 1 -name 'sushi-pend.*' 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "scan cleans up its temp files" "$before" "$after"
+
+# the EXIT trap runs after cmd_scan has returned, when its locals are gone —
+# under `set -u` a trap referring to them fails and taints every scan run
+err="$(HOME="$H" "$SUSHI" scan -n 2>&1 >/dev/null)"
+assert_eq "a scan run writes nothing to stderr" "" "$err"
+
 # --------------------------------------------------------------------------
 section "deleting managed stanzas"
 

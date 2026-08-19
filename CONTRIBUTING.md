@@ -33,6 +33,17 @@ body and handles backup, blank-line collapsing, validation and permissions. `ins
 and `remove_managed_aliases` (delete) are thin wrappers over it. Add a third operation the same way
 rather than writing to `$CONFIG` directly.
 
+**Keep the scan picker's redraw cheap.** `ctrl-x` fires a reload on every keypress, so anything on
+that path runs tens of times a second in practice. It reads a pre-built cache (`SUSHI_SCAN_CACHE`)
+and a pending-dismissals file (`SUSHI_SCAN_PENDING`); it must not touch the history, the ssh config
+or the ignore file. Two things that mattered when this was ~900ms a press: `is_ignored` re-read the
+ignore file for every candidate, and the config filter used `tr` plus `grep -Fxq` per candidate —
+about six forks a row. Both are now one-shot. Before adding work there, benchmark it:
+
+```bash
+SUSHI_SCAN_CACHE=/tmp/c SUSHI_SCAN_PENDING=/tmp/p ./sushi __menucache
+```
+
 **Mind the subshell.** `scan_candidates` is consumed via `done < <(...)`, so it runs in a child
 process — a counter incremented inside it never reaches the caller. That bit us once with the
 ignore-list tally. Filter and count in the caller's loop, where the body runs in the current shell.
