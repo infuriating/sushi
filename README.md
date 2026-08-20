@@ -1,6 +1,10 @@
-# sushi
+<p align="center">
+  <img src="./assets/banner.svg" width="880" alt="sushi — f*ck termius, use something better">
+</p>
 
-![test](../../actions/workflows/test.yml/badge.svg)
+<p align="center">
+  <img src="../../actions/workflows/test.yml/badge.svg" alt="tests">
+</p>
 
 *ssh + ui, rearranged.* A fuzzy picker for your SSH hosts that builds itself from your shell
 history — then gets out of the way.
@@ -125,8 +129,7 @@ rather than quietly shrinking its list.
 
 ### Look
 
-The default theme is taken off the logo — cyan through violet to magenta, on the near-black of the
-nori:
+Cyan through violet to magenta, on the near-black of the nori — the same palette as the icon:
 
 | | |
 | --- | --- |
