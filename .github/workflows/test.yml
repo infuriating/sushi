@@ -38,7 +38,7 @@ jobs:
           ssh -V
 
       - name: shellcheck
-        run: shellcheck -S warning sushi install.sh test/run.sh
+        run: shellcheck -S warning -x sushi install.sh test/run.sh
 
       - name: tests
         run: ./test/run.sh -v
