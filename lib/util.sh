@@ -100,6 +100,20 @@ function since(t,   r) {
 }
 '
 
+# ssh_config accepts `Key=Value` as well as `Key Value`. Rewrite a line so the
+# rest of the awk can keep matching on $1 / $2. Called on the current record.
+AWK_KW='
+function kweq(   line, keypart) {
+  line = $0
+  sub(/^[ \t]+/, "", line)
+  if (match(line, /^[A-Za-z][A-Za-z0-9]*[ \t]*=[ \t]*/)) {
+    keypart = substr(line, 1, RLENGTH)
+    gsub(/[ \t=]/, "", keypart)
+    $0 = keypart " " substr(line, RLENGTH + 1)
+  }
+}
+'
+
 # ------------------------------------------------------------------ fzf check --
 
 # How to install fzf on THIS machine. "brew install fzf" was hardcoded, which is

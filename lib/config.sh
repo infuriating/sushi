@@ -38,7 +38,7 @@ flatten_config() {
 # hand-written stanzas, simply have nothing there.
 config_hosts() {
   [ -r "$CONFIG" ] || return 0
-  flatten_config "$CONFIG" | AWK '
+  flatten_config "$CONFIG" | AWK "$AWK_KW"'
     function flush() {
       for (i = 1; i <= n; i++) {
         p = pat[i]
@@ -64,7 +64,7 @@ config_hosts() {
       next
     }
     NF == 0 { next }
-    { k = tolower($1); sub(/=$/, "", k) }
+    { kweq(); k = tolower($1) }
     k == "host"     { flush(); for (i = 2; i <= NF; i++) pat[++n] = $i; next }
     k == "match"    { flush(); next }
     n == 0          { next }
@@ -174,9 +174,10 @@ remove_managed_aliases() {
   # Space-separated on ONE line: onetrueawk (macOS) refuses a -v value with a
   # newline in it, and Host patterns cannot contain whitespace anyway.
   flat="$(printf '%s\n' "$names" | tr '\n' ' ')"
-  managed_block | AWK -v names="$flat" '
+  managed_block | AWK -v names="$flat" "$AWK_KW"'
     BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") kill[a[i]] = 1 }
     {
+      kweq()
       line = $0
       sub(/^[ \t]+/, "", line)
       if (tolower(line) ~ /^host[ \t]/) {

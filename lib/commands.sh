@@ -186,7 +186,7 @@ sorted by how often you used them$hidden_note" \
     done < "$pending"
     if [ "${#pats[@]}" -gt 0 ]; then
       printf '\n'
-      ignore_add "${pats[@]}"
+      ignore_add ${pats[@]+"${pats[@]}"}
     fi
   fi
 
@@ -213,6 +213,8 @@ sorted by how often you used them$hidden_note" \
   local answer
   printf '[w]rite  [e]dit first  [c]ancel ? '
   read -r answer
+  # Enter on a tty is write; EOF on a pipe is not consent.
+  [ -t 0 ] || [ -n "$answer" ] || answer=c
   case "$answer" in
     e|E) "${EDITOR:-vi}" "$additions"; install_block "$additions" ;;
     w|W|"") install_block "$additions" ;;
@@ -350,7 +352,7 @@ ignore_rows() {
   {
     config_hosts
     printf '%s\n' '@@SUSHI_ALIASES@@'
-    managed_block | AWK '{ l = $0; sub(/^[ \t]+/, "", l)
+    managed_block | AWK "$AWK_KW"'{ kweq(); l = $0; sub(/^[ \t]+/, "", l)
       if (tolower(l) ~ /^host[ \t]/) { for (i = 2; i <= NF; i++) print $i } }'
   } | AWK -v pink="$C_PROMPT" -v rice="$C_VALUE" -v off="$C_OFF" '
       BEGIN { FS = "\t"; mode = 0 }
@@ -452,7 +454,7 @@ cmd_ignore() {
       while IFS= read -r line; do [ -n "$line" ] && args+=("$line"); done <<EOF
 $sel
 EOF
-      ignore_remove "${args[@]}"
+      ignore_remove ${args[@]+"${args[@]}"}
       return $?
       ;;
     --help|-h)
@@ -508,8 +510,10 @@ EOF
 
   printf '\n'
   [ "${#dels[@]}" -gt 0 ] && printf 'Deleting from the managed block: %s\n' "${dels[*]}"
-  printf 'Adding to the ignore list:\n'
-  ignore_add "${pats[@]}"
+  if [ "${#pats[@]}" -gt 0 ]; then
+    printf 'Adding to the ignore list:\n'
+    ignore_add ${pats[@]+"${pats[@]}"}
+  fi
 
   if [ "${#dels[@]}" -gt 0 ]; then
     local names=""
@@ -586,8 +590,8 @@ cmd_preview() {
   local disp
   disp="$(tilde "$CONFIG")"
   printf '\n  %sstanza in %s%s\n' "$C_HEADING" "$disp" "$C_OFF"
-  flatten_config "$CONFIG" 2>/dev/null | AWK -v a="$a" -v d="$C_MUTED" -v z="$C_OFF" '
-    { k = tolower($1) }
+  flatten_config "$CONFIG" 2>/dev/null | AWK -v a="$a" -v d="$C_MUTED" -v z="$C_OFF" "$AWK_KW"'
+    { kweq(); k = tolower($1) }
     k == "host" { inb = 0; for (i = 2; i <= NF; i++) if ($i == a) inb = 1; if (inb) { print "    " d $0 z }; next }
     k == "match" { inb = 0; next }
     inb && NF { print "    " d $0 z }'
@@ -665,17 +669,26 @@ host_facts() {
         k = tolower($3) SUBSEP tolower($2)
         used[k] += $1
         if ($7 + 0 > lastk[k] + 0) lastk[k] = $7
-        b = tolower($3)
-        bare[b] += $1
-        if ($7 + 0 > lastb[b] + 0) lastb[b] = $7
         next
       }
       mode == 1 {
         split($0, f, "\t")
         if (f[1] == "") next
         k = tolower(f[2]) SUBSEP tolower(f[3])
-        n = used[k]; lu = lastk[k]
-        if (n == 0) { b = tolower(f[1]); n = bare[b]; lu = lastb[b] }
+        a = tolower(f[1])
+        n = 0; lu = ""
+        n += used[k] + 0
+        if (lastk[k] != "") lu = lastk[k]
+        if (a != tolower(f[2])) {
+          ak = a SUBSEP tolower(f[3])
+          n += used[ak] + 0
+          if (lastk[ak] != "" && lastk[ak] + 0 > lu + 0) lu = lastk[ak]
+        }
+        ek = a SUBSEP ""
+        if (ek != k) {
+          n += used[ek] + 0
+          if (lastk[ek] != "" && lastk[ek] + 0 > lu + 0) lu = lastk[ek]
+        }
         print f[1] "\t" f[2] "\t" f[3] "\t" f[4] "\t" f[5] "\t" n "\t" lu
       }
     '

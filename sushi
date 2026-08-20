@@ -27,7 +27,15 @@ set -uo pipefail
 
 VERSION="0.2.0"
 
-SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+# Follow $0 so a symlink on PATH still finds lib/ next to the real script.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  _dir="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)" || break
+  _tgt="$(readlink "$SELF")"
+  case "$_tgt" in /*) SELF="$_tgt" ;; *) SELF="$_dir/$_tgt" ;; esac
+done
+SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")"
+unset _dir _tgt
 SSH_DIR="${SSH_DIR:-$HOME/.ssh}"
 CONFIG="${SUSHI_CONFIG:-$SSH_DIR/config}"
 IGNORE="${SUSHI_IGNORE:-$SSH_DIR/sushi-ignore}"

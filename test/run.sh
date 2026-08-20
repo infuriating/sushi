@@ -148,6 +148,13 @@ else
   skip "tracked exec bits" "not a git checkout"
 fi
 
+# a symlink on PATH must still find lib/ next to the real script
+LINK="$WORK/sushi-link"
+ln -s "$SUSHI" "$LINK"
+out="$("$LINK" --version 2>&1)"
+assert_has "a symlink to sushi still runs" "sushi " "$out"
+assert_lacks "and does not look for lib/ next to the symlink" "No such file" "$out"
+
 # --------------------------------------------------------------------------
 section "ssh_config parsing"
 
@@ -184,6 +191,21 @@ assert_lacks "skips wildcard patterns"              "wild-" "$out"
 # careful: a naive ":22" search also matches ":2222"
 n="$(printf '%s\n' "$out" | grep -c ':22$' || true)"
 assert_eq "omits :22 for the default port" "0" "$n"
+
+# ssh_config accepts Key=Value as well as Key Value
+H="$(newhome cfgeq)"
+cat > "$H/.ssh/config" <<'EOF'
+Host=eqhost
+    HostName=eq.example.com
+    User=equser
+    Port=2222
+Host spaced
+    HostName spaced.example.com
+EOF
+out="$(run "$H" list)"
+assert_has "reads Host=name"              "eqhost" "$out"
+assert_has "reads HostName= / User= / Port=" "equser@eq.example.com:2222" "$out"
+assert_has "space-separated stanzas still work" "spaced" "$out"
 
 # --------------------------------------------------------------------------
 section "history parsing"
@@ -490,6 +512,18 @@ assert_has "earlier imports survive the new one"   "web1"                    "$o
 assert_has "hand-written stanzas still survive"    "mine-by-hand"            "$out"
 
 # --------------------------------------------------------------------------
+section "scan: a pipe is not consent to write"
+
+H="$(newhome pipeeof)"
+printf ': 1:0;ssh piped@pipe.example.com\n' > "$H/.zsh_history"
+out="$(true | HOME="$H" "$SUSHI" scan 2>&1)"
+assert_has "EOF on a pipe cancels rather than writes" "Cancelled" "$out"
+assert_lacks "and leaves ~/.ssh/config unwritten" "Host pipe" \
+             "$(cat "$H/.ssh/config" 2>/dev/null)"
+out="$(printf 'w\n' | HOME="$H" "$SUSHI" scan 2>&1)"
+assert_has "an explicit w on a pipe still writes" "Host pipe" "$(cat "$H/.ssh/config")"
+
+# --------------------------------------------------------------------------
 section "scan: does not re-add what config already covers"
 
 H="$(newhome covered)"
@@ -650,6 +684,23 @@ assert_eq "last-used host first"   "alpha" "$(printf '%s\n' "$order" | sed -n 1p
 assert_eq "then the next"          "zulu"  "$(printf '%s\n' "$order" | sed -n 2p)"
 assert_eq "a bare \`ssh alias\` counts for that alias" "alpha" "$(printf '%s\n' "$order" | sed -n 1p)"
 assert_eq "never-used hosts trail" "cold"  "$(printf '%s\n' "$order" | sed -n 4p)"
+
+# hostname+user AND the alias both contribute — a newer `ssh alias` must not
+# lose to an older `ssh user@hostname` just because the pair already had a hit
+Hmix="$(newhome sortmix)"
+cat > "$Hmix/.ssh/config" <<'EOF'
+Host staging
+    HostName real.example.com
+    User deploy
+Host other
+    HostName other.example.com
+    User deploy
+EOF
+printf ': 100:0;ssh deploy@real.example.com\n: 900:0;ssh staging\n: 200:0;ssh deploy@other.example.com\n' \
+  > "$Hmix/.zsh_history"
+order="$(XDG_CACHE_HOME="$WORK/mix-cache" HOME="$Hmix" SUSHI_THEME=none "$SUSHI" __lines 2>&1 | aliases)"
+assert_eq "a newer ssh-by-alias beats an older user@host" "staging" \
+          "$(printf '%s\n' "$order" | sed -n 1p)"
 
 order="$(run "$H" __lines count | aliases)"
 assert_eq "sort=count is most-used first" "zulu" "$(printf '%s\n' "$order" | sed -n 1p)"
