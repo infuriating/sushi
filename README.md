@@ -79,7 +79,28 @@ alphabetically — `bastion` being first because it starts with b is not useful.
 trail at the bottom, A-Z among themselves. `SUSHI_SORT=alpha` restores plain alphabetical.
 
 Other commands: `sushi list` prints the host table, `sushi edit` opens the config,
-`sushi choose` prints an alias instead of connecting (useful for your own scripts).
+`sushi choose` prints an alias instead of connecting (useful for your own scripts), and
+`sushi --version` says which build you are on (plus the commit, since `git pull` is the update).
+
+`sushi <TAB>` completes subcommands and your imported aliases. `ssh <TAB>` is deliberately left
+alone: sushi writes real `Host` stanzas, so zsh's own `_ssh` already knows every alias — that is
+the point of the config being the deliverable rather than a private database.
+
+### Adding a host by hand
+
+A server you have never SSH'd to cannot show up in your history, so `scan` will never offer it.
+`sushi add` is the way in — same parser, same alias rules, same managed block:
+
+```bash
+sushi add deploy@web1.example.com
+sushi add web1.example.com:2222              # the form sushi itself prints, pasted back
+sushi add box.example.com -i ~/.ssh/work     # any ssh flag scan understands
+sushi add --as staging deploy@10.20.30.40 -J bastion
+sushi add -n deploy@web1.example.com         # dry run
+```
+
+Adding the same `user@host` twice is refused with the alias that already covers it — pass `--as` if
+you genuinely want a second stanza for it, say on a different key.
 
 ### Making things go away
 
@@ -271,7 +292,8 @@ Everything sushi writes goes inside a marked block:
   alias, a `ProxyJump`, or a wrapper script won't be found.
 - Bare IPv6 literals (`ssh 2001:db8::1`) are skipped — indistinguishable from `host:port` without
   guessing.
-- The shell integration is zsh-only. bash and fish users can still use `sushi` as a command.
+- The shell integration and the completion are zsh-only. bash and fish users can still use `sushi`
+  as a command — `scan`, `add`, `list` and `ignore` need no integration at all.
 - `SUSHI_MODE=wrap` disables terminal-native `ssh` completion, as described above. Use `enter`.
 - `^S` is XOFF under legacy terminal flow control; `key` mode runs `stty -ixon` when that is the
   chosen key. Pass `--key='^G'` if you'd rather it left your tty settings alone.
@@ -283,7 +305,7 @@ Everything sushi writes goes inside a marked block:
 ## Tests
 
 ```bash
-./test/run.sh        # ~190 assertions, no fzf or terminal needed
+./test/run.sh        # ~360 assertions, no fzf or terminal needed
 ./test/run.sh -v     # show every assertion
 ```
 
@@ -292,6 +314,12 @@ glob safety, port collapsing, hashed `known_hosts`, alias collisions, managed-bl
 idempotency, refusal to write an unparseable config, what each `SUSHI_MODE` does and does not
 touch, and `install.sh` being idempotent and fully reversible. CI runs it on Linux and macOS — the
 macOS job exercises bash 3.2, which is what ships with the OS.
+
+Two sections earn their keep beyond ordinary coverage. One feeds ~4,500 generated command lines
+through both history parsers — the awk one that runs and the bash one it was transcribed from — and
+requires byte-identical output, which is what makes touching that code safe. The other feeds in
+bytes that are not valid UTF-8, because macOS's awk aborts the whole program on the first one it
+sees and takes every host after it down silently.
 
 ## Licence
 
