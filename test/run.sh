@@ -1564,12 +1564,17 @@ mkdir -p "$FAKEBIN"
   printf 'fzf_install_cmd\n'
 } > "$FZFFN"
 
+# One wrapper so the shellcheck directive is written once. The path is built two
+# lines up; there is nothing for shellcheck to follow.
+# shellcheck disable=SC1090
+fzf_hint_with() { ( PATH="$1"; . "$FZFFN" ); }
+
 # stub -> the exact command it must produce
 while IFS='|' read -r pm want; do
   [ -n "$pm" ] || continue
   rm -f "${FAKEBIN:?}"/*
   printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/$pm"; chmod +x "$FAKEBIN/$pm"
-  assert_eq "the fzf hint for $pm" "$want" "$( PATH="$FAKEBIN"; . "$FZFFN" )"
+  assert_eq "the fzf hint for $pm" "$want" "$(fzf_hint_with "$FAKEBIN")"
 done <<'EOF'
 brew|brew install fzf
 apt-get|sudo apt install fzf
@@ -1588,11 +1593,11 @@ rm -f "${FAKEBIN:?}"/*
 for pm in brew apt-get; do
   printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/$pm"; chmod +x "$FAKEBIN/$pm"
 done
-assert_eq "brew takes precedence over apt" "brew install fzf" "$( PATH="$FAKEBIN"; . "$FZFFN" )"
+assert_eq "brew takes precedence over apt" "brew install fzf" "$(fzf_hint_with "$FAKEBIN")"
 
 rm -f "${FAKEBIN:?}"/*
 assert_has "with no package manager it points at the project" \
-           "github.com/junegunn/fzf" "$( PATH="$FAKEBIN"; . "$FZFFN" )"
+           "github.com/junegunn/fzf" "$(fzf_hint_with "$FAKEBIN")"
 
 # and the engine's own hint is one line, whatever it says
 hint="$("$SUSHI" __fzfhint)"
