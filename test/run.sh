@@ -1545,23 +1545,61 @@ assert_lacks "stays quiet about Warp in enter mode" "shadows the ssh" "$out"
 
 # A missing fzf must produce advice that is right for THIS machine, and must
 # never block a non-interactive run (CI pipes install.sh its stdin from nowhere).
+#
+# fzf_install_cmd is exercised on its own, with a PATH holding nothing but the
+# stub under test. Running it through the whole script instead would measure the
+# runner's distro, not the function: /usr/bin/apt-get is real on the Linux job, so
+# the "no package manager" case found one and every other case matched apt before
+# reaching its own stub.
+#
+# Sourced into a subshell rather than exec'd, so no PATH lookup is needed for the
+# shell itself — `command -v` and `printf` are builtins, which is the whole
+# dependency surface of the function.
 FAKEBIN="$WORK/fakebin"
+FZFFN="$WORK/fzf_install_cmd.sh"
 mkdir -p "$FAKEBIN"
-for pm in apt-get dnf pacman zypper apk; do
+{
+  printf 'have() { command -v "$1" >/dev/null 2>&1; }\n'
+  sed -n '/^fzf_install_cmd()/,/^}/p' "$SUSHI"
+  printf 'fzf_install_cmd\n'
+} > "$FZFFN"
+
+# stub -> the exact command it must produce
+while IFS='|' read -r pm want; do
+  [ -n "$pm" ] || continue
   rm -f "${FAKEBIN:?}"/*
   printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/$pm"; chmod +x "$FAKEBIN/$pm"
-  hint="$(PATH="$FAKEBIN:/usr/bin:/bin" "$SUSHI" __fzfhint)"
-  assert_has "the fzf hint knows $pm" "fzf" "$hint"
-  assert_lacks "and does not say brew when only $pm is there" "brew" "$hint"
-done
+  assert_eq "the fzf hint for $pm" "$want" "$( PATH="$FAKEBIN"; . "$FZFFN" )"
+done <<'EOF'
+brew|brew install fzf
+apt-get|sudo apt install fzf
+dnf|sudo dnf install fzf
+yum|sudo yum install fzf
+pacman|sudo pacman -S fzf
+zypper|sudo zypper install fzf
+apk|sudo apk add fzf
+port|sudo port install fzf
+pkg|sudo pkg install fzf
+nix-env|nix-env -iA nixpkgs.fzf
+EOF
+
+# brew wins when both are there: someone with brew on Linux wants brew
 rm -f "${FAKEBIN:?}"/*
-hint="$(PATH="$FAKEBIN:/usr/bin:/bin" "$SUSHI" __fzfhint)"
-assert_has "with no package manager it points at the project" "github.com/junegunn/fzf" "$hint"
+for pm in brew apt-get; do
+  printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/$pm"; chmod +x "$FAKEBIN/$pm"
+done
+assert_eq "brew takes precedence over apt" "brew install fzf" "$( PATH="$FAKEBIN"; . "$FZFFN" )"
+
+rm -f "${FAKEBIN:?}"/*
+assert_has "with no package manager it points at the project" \
+           "github.com/junegunn/fzf" "$( PATH="$FAKEBIN"; . "$FZFFN" )"
+
+# and the engine's own hint is one line, whatever it says
+hint="$("$SUSHI" __fzfhint)"
+assert_eq "the engine's hint is a single line" "1" "$(printf '%s\n' "$hint" | wc -l | tr -d ' ')"
+assert_has "and mentions fzf"                  "fzf" "$hint"
 
 printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/apt-get"; chmod +x "$FAKEBIN/apt-get"
-out="$(HOME="$IH" SHELL=/bin/zsh PATH="$FAKEBIN:/usr/bin:/bin" \
-       run_bounded "$IH" 20 __fzfhint)"
-assert_eq "the engine's hint is a single line" "1" "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
 
 # install.sh, non-interactive, no fzf on PATH: warns with the right command and
 # exits on its own rather than waiting on a prompt nobody can answer
