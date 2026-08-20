@@ -71,9 +71,39 @@ info "integration: $HERE/sushi.zsh"
 # --- dependencies -----------------------------------------------------------
 command -v ssh >/dev/null 2>&1 || warn "ssh not found on PATH — that is unusual, check your setup"
 
-if ! command -v fzf >/dev/null 2>&1; then
-  warn "fzf not found. The picker needs it:  brew install fzf"
-  warn "everything else (scan, list) works without it."
+# The picker is the reason most people install sushi, so "fzf not found" the
+# first time you press the key is a bad first impression — check for it here
+# instead. The install command comes from the engine (`sushi __fzfhint`) rather
+# than being spelled out again: hardcoding `brew install fzf` was wrong advice on
+# most machines sushi runs on, and wrong advice sends you after the wrong problem.
+if command -v fzf >/dev/null 2>&1; then
+  info "fzf:         $(command -v fzf)"
+else
+  FZF_CMD="$("$HERE/sushi" __fzfhint 2>/dev/null || true)"
+  warn "fzf not found — the picker needs it."
+  warn "everything else (scan, add, list) works without it."
+  # Only offer when there is a real command to run and someone to answer. In CI,
+  # or piped, this must stay a warning and nothing else.
+  if [ -n "$FZF_CMD" ] && [ "${FZF_CMD#see }" = "$FZF_CMD" ] && [ -t 0 ]; then
+    printf '  install it now with `%s`? [y/N] ' "$FZF_CMD"
+    read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES)
+        if sh -c "$FZF_CMD"; then
+          if command -v fzf >/dev/null 2>&1; then
+            info "fzf:         $(command -v fzf)"
+          else
+            warn "that finished, but fzf is still not on PATH — check your shell's PATH"
+          fi
+        else
+          warn "that did not work. Install fzf yourself, then re-run this script."
+        fi
+        ;;
+      *) warn "skipped — install it later with:  $FZF_CMD" ;;
+    esac
+  else
+    warn "install it with:  $FZF_CMD"
+  fi
 fi
 
 case "${SHELL:-}" in

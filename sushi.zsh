@@ -123,6 +123,77 @@ sushi() {
   _sushi_dispatch "$("$SUSHI_BIN" choose "$sub")"
 }
 
+# --- completion for the `sushi` command -------------------------------------
+#
+# Above the `off` early-return on purpose: `off` means "load no key bindings and
+# do not touch ssh", not "give me a worse `sushi` command" — completing it is
+# still wanted, and is the only sushi surface an off-mode user has.
+#
+# Defined here rather than shipped as a `_sushi` file in fpath, because
+# install.sh appends its source line to the END of ~/.zshrc — by which point
+# oh-my-zsh (or your own compinit) has already run, and a directory added to
+# fpath afterwards is never scanned. `compdef` works at any point after compinit,
+# so that is what this uses; with no compinit at all it is skipped silently.
+#
+# Note what is NOT here: completion for `ssh`. It does not need any — sushi
+# writes real Host stanzas, so zsh's stock _ssh (and your terminal's own) already
+# complete every imported alias. That is the whole point of the config being the
+# deliverable.
+if (( $+functions[compdef] )); then
+  _sushi_aliases() {
+    local -a hosts
+    hosts=(${(f)"$("$SUSHI_BIN" __aliases 2>/dev/null)"})
+    (( $#hosts )) && _describe -t hosts 'host' hosts
+  }
+
+  _sushi() {
+    local -a subs
+    if (( CURRENT == 2 )); then
+      subs=(
+        'scan:import hosts found in your shell history'
+        'add:import one host by hand'
+        'ignore:stop scan offering something, or drop an imported host'
+        'list:print the host table'
+        'edit:open the ssh config in $EDITOR'
+        'choose:print the chosen alias instead of connecting'
+        'help:show usage'
+        '--version:print the version'
+      )
+      _describe -t commands 'sushi command' subs
+      # a bare word is also a picker query, so aliases belong here too
+      _sushi_aliases
+      return
+    fi
+
+    case ${words[2]} in
+      scan)
+        _arguments -s : \
+          '(-n --dry-run)'{-n,--dry-run}'[show what would be imported, write nothing]'
+        ;;
+      add)
+        _arguments -s : \
+          '(-n --dry-run)'{-n,--dry-run}'[show the stanza, write nothing]' \
+          '(--as -a)'{--as,-a}'[alias to file it under]:alias:' \
+          '--help[show usage]' \
+          '*:destination:'
+        ;;
+      ignore|delete|rm)
+        _arguments -s : \
+          '(--list -l)'{--list,-l}'[show the ignore list]' \
+          '(--remove -r --unignore)'{--remove,-r,--unignore}'[stop ignoring a pattern]' \
+          '(--edit -e)'{--edit,-e}'[open the ignore list in $EDITOR]' \
+          '--help[show usage]' \
+          '*:host or pattern:_sushi_aliases'
+        ;;
+      choose)
+        _sushi_aliases
+        ;;
+    esac
+  }
+
+  compdef _sushi sushi
+fi
+
 [[ ,$SUSHI_MODE, == *,off,* ]] && return 0
 
 # --- mode: key --------------------------------------------------------------
