@@ -167,6 +167,9 @@ if (( $+functions[compdef] )); then
         'theme:show the active theme, or list and set themes'
         'themes:list every theme on the search path'
         'choose:print the chosen alias instead of connecting'
+        'export:write sanitized Host stanzas to a share file'
+        'share:alias for export'
+        'import:merge a share file into ~/.ssh/config'
         'doctor:check binaries, ~/.ssh, integration, theme'
         'help:show usage'
         '--version:print the version'
@@ -199,6 +202,23 @@ if (( $+functions[compdef] )); then
         ;;
       choose)
         _sushi_aliases
+        ;;
+      export|share)
+        _arguments -s : \
+          '(-n --dry-run)'{-n,--dry-run}'[show the share file, write nothing]' \
+          '(-o --output)'{-o,--output}'[write to FILE (- = stdout)]:file:_files' \
+          '--all[export every host]' \
+          '--config[also include theme / mode / ignore]' \
+          '--force[overwrite an existing output file]' \
+          '--help[show usage]' \
+          '*:alias:_sushi_aliases'
+        ;;
+      import)
+        _arguments -s : \
+          '(-n --dry-run)'{-n,--dry-run}'[show what would be imported, write nothing]' \
+          '--config[also apply ignore / theme from the share]' \
+          '--help[show usage]' \
+          '1:share file:_files'
         ;;
       theme)
         # `theme` alone shows the active one; the verbs are what needs completing

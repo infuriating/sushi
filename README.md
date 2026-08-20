@@ -132,6 +132,35 @@ sushi add -n deploy@web1.example.com         # dry run
 Adding the same `user@host` twice is refused with the alias that already covers it — pass `--as` if
 you genuinely want a second stanza for it, say on a different key.
 
+### Sharing hosts
+
+`sushi export` (alias `sushi share`) writes a text file of Host stanzas you can send to a colleague
+or move to another machine. `sushi import` merges that file into the managed block of
+`~/.ssh/config`.
+
+```bash
+sushi share                    # pick hosts, write ./sushi-share
+sushi export staging web1      # named aliases, no picker
+sushi export --all -o team.txt
+# …send the file…
+sushi import team.txt          # on the other machine
+```
+
+Only four fields travel: the alias (`Host`), `HostName`, `User`, and `Port`. `IdentityFile`,
+`ProxyJump`, and private keys are stripped — the recipient points those at their own keys and
+bastions. A share file is ordinary ssh_config, so a hand-written snippet imports the same way.
+
+For moving yourself to a new laptop, add `--config` to also pack the ignore list, theme, and
+sushi knobs (`SUSHI_MODE`, `SUSHI_SORT`, …):
+
+```bash
+sushi export --all --config -o me.txt
+sushi import --config me.txt   # applies ignore / theme; prints the other knobs
+```
+
+`-n` is a dry run on both sides. Piped stdout defaults to stdout; a TTY writes `./sushi-share`
+and refuses to clobber an existing file unless you pass `--force`.
+
 ### Making things go away
 
 Your history accumulates hosts you'll never use again — a box that's been decommissioned, a

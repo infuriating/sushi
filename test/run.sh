@@ -1373,6 +1373,205 @@ out="$(run "$H" __ignoremenu | run "$H" __ignoresplit)"
 assert_has "coloured rows straight from the picker still split" "D	alpha" "$out"
 
 # --------------------------------------------------------------------------
+section "sushi export / import / share"
+
+H="$(newhome share)"
+mkdir -p "$H/.ssh"
+chmod 700 "$H/.ssh"
+{
+  printf '%s\n' '# >>> sushi managed hosts >>>'
+  printf '%s\n' '# Managed by sushi.'
+  printf '\n'
+  printf '%s\n' 'Host alpha'
+  printf '%s\n' '    HostName a.example.com'
+  printf '%s\n' '    User alice'
+  printf '%s\n' '    Port 2222'
+  printf '%s\n' '    IdentityFile ~/.ssh/id_alpha'
+  printf '%s\n' '    ProxyJump bastion'
+  printf '\n'
+  printf '%s\n' 'Host beta'
+  printf '%s\n' '    HostName b.example.com'
+  printf '%s\n' '    User bob'
+  printf '\n'
+  printf '%s\n' '# <<< sushi managed hosts <<<'
+  printf '\n'
+  printf '%s\n' '# hand-written below'
+  printf '%s\n' 'Host handmade'
+  printf '%s\n' '    HostName hand.example.com'
+} > "$H/.ssh/config"
+chmod 600 "$H/.ssh/config"
+
+# --all sanitizes
+out="$(run "$H" export --all -o - 2>/dev/null)"
+assert_has   "export --all emits Host alpha"     "Host alpha"              "$out"
+assert_has   "and HostName"                      "HostName a.example.com"  "$out"
+assert_has   "and User"                          "User alice"              "$out"
+assert_has   "and non-22 Port"                   "Port 2222"               "$out"
+assert_lacks "no IdentityFile keyword line"      $'\n    IdentityFile'     "$out"
+assert_lacks "no ProxyJump keyword line"         $'\n    ProxyJump'         "$out"
+assert_has   "handmade hosts are included"       "Host handmade"           "$out"
+assert_has   "share file carries the marker"     "# sushi-share 1"         "$out"
+
+# named alias subset
+out="$(run "$H" export beta -o - 2>/dev/null)"
+assert_has   "named export keeps beta"   "Host beta"  "$out"
+assert_lacks "and drops the others"      "Host alpha" "$out"
+
+# share == export
+out_share="$(run "$H" share --all -o - 2>/dev/null)"
+out_exp="$(run "$H" export --all -o - 2>/dev/null)"
+assert_eq "share matches export" "$out_exp" "$out_share"
+
+# -o file + refuse clobber
+SHAREF="$WORK/sushi-share-out"
+rm -f "$SHAREF"
+out="$(cd "$WORK" && HOME="$H" "$SUSHI" export --all -o "$SHAREF" 2>&1)"
+assert_has "writes the named file" "Wrote" "$out"
+mode="$(ls -l "$SHAREF" | cut -c1-10)"
+assert_eq "share file mode looks private" "-rw-------" "$mode"
+if HOME="$H" "$SUSHI" export --all -o "$SHAREF" >/dev/null 2>&1; then
+  no "refuses to clobber without --force"
+else
+  ok "refuses to clobber without --force"
+fi
+out="$(HOME="$H" "$SUSHI" export --all --force -o "$SHAREF" 2>&1)"
+assert_has "force overwrites" "Wrote" "$out"
+
+# dry run writes nothing new
+rm -f "$WORK/dry-share"
+out="$(HOME="$H" "$SUSHI" export --all -n -o "$WORK/dry-share" 2>&1)"
+assert_has "dry run says so" "dry run" "$out"
+if [ -e "$WORK/dry-share" ]; then no "dry run leaves no file"; else ok "dry run leaves no file"; fi
+
+# import merges; unmanaged content survives
+H2="$(newhome share-imp)"
+mkdir -p "$H2/.ssh"; chmod 700 "$H2/.ssh"
+{
+  printf '%s\n' '# keep me'
+  printf '%s\n' 'Host keep'
+  printf '%s\n' '    HostName keep.example.com'
+} > "$H2/.ssh/config"
+chmod 600 "$H2/.ssh/config"
+printf 'w\n' | HOME="$H2" "$SUSHI" import "$SHAREF" >/dev/null 2>&1
+cfg="$(cat "$H2/.ssh/config")"
+assert_has "import adds alpha"              "Host alpha"         "$cfg"
+assert_has "import adds beta"               "Host beta"          "$cfg"
+assert_has "unmanaged content survives"     "Host keep"          "$cfg"
+assert_has "and the keep comment"           "# keep me"          "$cfg"
+assert_has "lands inside the managed block" "sushi managed"      "$cfg"
+assert_lacks "imported without IdentityFile" "IdentityFile"      "$cfg"
+assert_has "stamps # added"                 "# added "           "$cfg"
+n="$(count_backups "$H2/.ssh")"
+assert_eq "import took a backup" "1" "$n"
+assert_eq "config stays 0600" "-rw-------" "$(ls -l "$H2/.ssh/config" | cut -c1-10)"
+
+# collision: existing alias skipped; same host under new alias kept
+{
+  printf '%s\n' 'Host alpha'
+  printf '%s\n' '    HostName elsewhere.example.com'
+  printf '\n'
+  printf '%s\n' 'Host fresh'
+  printf '%s\n' '    HostName a.example.com'
+  printf '%s\n' '    User alice'
+} > "$WORK/collide.txt"
+out="$(printf 'w\n' | HOME="$H2" "$SUSHI" import "$WORK/collide.txt" 2>&1)"
+assert_has   "skips existing alias"     "skipping alpha" "$out"
+assert_has   "keeps a new alias"        "Host fresh"     "$(cat "$H2/.ssh/config")"
+assert_has   "even for the same host"   "fresh"          "$(HOME="$H2" "$SUSHI" list)"
+
+# refuse Match / Include / IdentityFile / wildcards
+{
+  printf '%s\n' 'Host star'
+  printf '%s\n' '    HostName star.example.com'
+  printf '%s\n' '    IdentityFile ~/.ssh/nope'
+  printf '\n'
+  printf '%s\n' 'Host *.evil'
+  printf '%s\n' '    HostName evil.example.com'
+  printf '\n'
+  printf '%s\n' 'Match host foo'
+  printf '%s\n' '    HostName matched.example.com'
+  printf '\n'
+  printf '%s\n' 'Include /etc/ssh/ssh_config'
+} > "$WORK/nasty.txt"
+H3="$(newhome share-nasty)"
+mkdir -p "$H3/.ssh"; chmod 700 "$H3/.ssh"
+out="$(printf 'w\n' | HOME="$H3" "$SUSHI" import "$WORK/nasty.txt" 2>&1)"
+cfg="$(cat "$H3/.ssh/config" 2>/dev/null || true)"
+assert_has   "keeps a clean Host"           "Host star"       "$cfg"
+assert_lacks "drops IdentityFile on import" "IdentityFile"    "$cfg"
+assert_lacks "drops wildcard Host"          "Host *.evil"     "$cfg"
+assert_has   "warns about IdentityFile"     "dropping"        "$out"
+
+# raw ssh_config without markers
+{
+  printf '%s\n' 'Host raw'
+  printf '%s\n' '    HostName raw.example.com'
+  printf '%s\n' '    User rawuser'
+} > "$WORK/raw.txt"
+out="$(printf 'w\n' | HOME="$H3" "$SUSHI" import "$WORK/raw.txt" 2>&1)"
+assert_has "raw ssh_config imports" "Host raw" "$(cat "$H3/.ssh/config")"
+
+# pipe is not consent
+H4="$(newhome share-pipe)"
+mkdir -p "$H4/.ssh"; chmod 700 "$H4/.ssh"
+: > "$H4/.ssh/config"; chmod 600 "$H4/.ssh/config"
+out="$(printf '' | HOME="$H4" "$SUSHI" import "$WORK/raw.txt" 2>&1)"
+assert_has   "a pipe cancels"          "Cancelled" "$out"
+assert_lacks "and writes nothing"      "Host raw"  "$(cat "$H4/.ssh/config")"
+
+# -n writes nothing
+out="$(printf 'w\n' | HOME="$H4" "$SUSHI" import -n "$WORK/raw.txt" 2>&1)"
+assert_has   "import -n says dry run"  "dry run"  "$out"
+assert_lacks "and leaves config empty" "Host raw" "$(cat "$H4/.ssh/config")"
+
+# --config round-trip for ignore + custom theme
+H5="$(newhome share-cfg)"
+mkdir -p "$H5/.ssh" "$H5/.config/sushi/themes"
+chmod 700 "$H5/.ssh"
+{
+  printf '%s\n' '# >>> sushi managed hosts >>>'
+  printf '%s\n' 'Host solo'
+  printf '%s\n' '    HostName solo.example.com'
+  printf '%s\n' '# <<< sushi managed hosts <<<'
+} > "$H5/.ssh/config"
+chmod 600 "$H5/.ssh/config"
+printf 'root@*\n*.staging.example.com\n' > "$H5/.ssh/sushi-ignore"
+chmod 600 "$H5/.ssh/sushi-ignore"
+printf 'name: mine\naccent: "#112233"\n' > "$H5/.config/sushi/themes/mine.yaml"
+CFGS="$WORK/with-cfg.txt"
+out="$(HOME="$H5" SUSHI_THEME=mine SUSHI_MODE=enter "$SUSHI" export --all --config -o "$CFGS" 2>&1)"
+assert_has "config export wrote a file" "Wrote" "$out"
+body="$(cat "$CFGS")"
+assert_has "includes ignore section"   "@@SUSHI_IGNORE@@" "$body"
+assert_has "includes root@*"           "root@*"           "$body"
+assert_has "includes theme section"    "@@SUSHI_THEME@@"  "$body"
+assert_has "includes SUSHI_MODE"       "SUSHI_MODE=enter" "$body"
+
+H6="$(newhome share-cfg-in)"
+mkdir -p "$H6/.ssh"; chmod 700 "$H6/.ssh"
+: > "$H6/.ssh/config"; chmod 600 "$H6/.ssh/config"
+# without --config: hosts land, settings noted
+out="$(printf 'w\n' | HOME="$H6" SUSHI_RC="$H6/.zshrc" "$SUSHI" import "$CFGS" 2>&1)"
+assert_has "notes settings without --config" "pass --config" "$out"
+assert_has "still imports the host"          "Host solo"     "$(cat "$H6/.ssh/config")"
+assert_lacks "does not write ignore yet"     "root@"         "$(cat "$H6/.ssh/sushi-ignore" 2>/dev/null || true)"
+
+# with --config: ignore + theme applied
+H7="$(newhome share-cfg-apply)"
+mkdir -p "$H7/.ssh"; chmod 700 "$H7/.ssh"
+: > "$H7/.ssh/config"; chmod 600 "$H7/.ssh/config"
+out="$(printf 'w\n' | HOME="$H7" SUSHI_RC="$H7/.zshrc" "$SUSHI" import --config "$CFGS" 2>&1)"
+assert_has "applies ignore patterns" "root@*" "$(cat "$H7/.ssh/sushi-ignore")"
+assert_has "writes the theme file"   "mine"   "$(ls "$H7/.config/sushi/themes/")"
+assert_has "persists SUSHI_THEME"    "SUSHI_THEME=mine" "$(cat "$H7/.zshrc")"
+
+# subcommands advertised
+subs="$("$SUSHI" __subcommands)"
+assert_has "__subcommands lists export" "export" "$subs"
+assert_has "__subcommands lists share"  "share"  "$subs"
+assert_has "__subcommands lists import" "import" "$subs"
+
+# --------------------------------------------------------------------------
 section "sushi add"
 
 H="$(newhome add)"
@@ -1474,6 +1673,8 @@ assert_has "usage lists add"        "sushi add"     "$out"
 assert_has "usage lists --version"  "sushi --version" "$out"
 assert_has "usage still lists scan" "sushi scan"    "$out"
 assert_has "usage lists doctor"     "sushi doctor"  "$out"
+assert_has "usage lists export"     "sushi export"  "$out"
+assert_has "usage lists import"     "sushi import"  "$out"
 assert_lacks "and stops at the code" "set -uo"      "$out"
 
 # --------------------------------------------------------------------------
