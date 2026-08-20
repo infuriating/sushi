@@ -16,6 +16,12 @@ PASS=0; FAIL=0; SKIP=0
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sushi-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
+# theme_dirs prefers $XDG_CONFIG_HOME over $HOME/.config. CI (and some desktops)
+# export it pointing at the real home, which would hide every theme the suite
+# plants under its fake HOME. Same idea for SUSHI_THEME: the suite assumes the
+# built-in default unless a test sets it.
+unset XDG_CONFIG_HOME SUSHI_THEME
+
 red()   { printf '\033[31m%s\033[0m' "$1"; }
 green() { printf '\033[32m%s\033[0m' "$1"; }
 dim()   { printf '\033[2m%s\033[0m' "$1"; }
