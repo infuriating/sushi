@@ -151,6 +151,14 @@ embedded in the script, so a file and the default share one code path — `theme
 copy of it and the suite diffs the two, so edit both or neither. New roles need an entry in
 `theme_read`, `cmd_theme` and both copies of the default.
 
+**Writing to someone's ~/.zshrc has three rules.** `sushi theme set` is the only place sushi touches
+a file that is not `~/.ssh/*`, and it earns that by behaving like the config write path: back up
+first (`.sushi-backup`), be idempotent (running it twice leaves one line and one marker block, not
+two), and never move or reformat anything else in the file. Plus one rule of its own — the line goes
+*above* `install.sh`'s `# >>> sushi >>>` markers, never inside them, because `install.sh` rewrites
+that block verbatim on every run and would silently eat the setting. There is a test for exactly
+that: it writes a theme, runs `install.sh` over the same rc, and asserts the line survived.
+
 **A broken theme must not break ssh.** Every parse failure warns and carries on with what it has.
 sushi is how someone reaches a server; a typo in a colour is not a reason to stop them.
 
@@ -182,11 +190,16 @@ sushi __extract          # history lines on stdin -> user|host|port|key|jump|epo
 sushi __ignoresplit      # ignore-picker selection on stdin -> P/D instructions
 sushi __aliases          # alias names only, for completion
 sushi __fzfhint          # the platform's fzf install command (install.sh reuses it)
+sushi __themes           # theme names, for completion and the theme picker
+sushi __themepreview     # the theme picker's preview pane for $SUSHI_THEME
 ```
 
 `sushi theme` is not hidden, but it belongs in the same list: it prints the resolved palette, the
 file it came from, and every directory that was searched — which answers most of "I edited the yaml
-and nothing changed".
+and nothing changed". `sushi theme list` shows precedence between those directories.
+
+`SUSHI_RC` points `theme set` at a throwaway rc file, which is how the tests exercise it without a
+real `~/.zshrc`.
 
 Point them at a fixture rather than your real history:
 

@@ -12,6 +12,8 @@
 #   sushi list         print the host table (no fzf needed)
 #   sushi edit         open ~/.ssh/config in $EDITOR
 #   sushi theme        show the active theme, where it came from, and where to put one
+#   sushi theme list   list every theme on the search path (also: sushi themes)
+#   sushi theme set    pick a theme in fzf and keep it; `set <name>` skips the picker
 #   sushi choose       print the chosen alias instead of connecting
 #   sushi --version    print the version
 #
@@ -31,15 +33,32 @@ IGNORE="${SUSHI_IGNORE:-$SSH_DIR/sushi-ignore}"
 BEGIN_MARK="# >>> sushi managed hosts >>>"
 END_MARK="# <<< sushi managed hosts <<<"
 
+# `sushi --theme` writes one line into the shell rc and has to find it again to
+# replace it. Its own markers, distinct from install.sh's `# >>> sushi >>>` —
+# the theme line lives just above that block, never inside it, because
+# install.sh rewrites everything between its own markers on every run.
+THEME_BEGIN="# >>> sushi theme >>>"
+THEME_END="# <<< sushi theme <<<"
+INSTALL_BEGIN="# >>> sushi >>>"
+
 # Every subcommand name the dispatcher at the bottom handles. Published via
 # `sushi __subcommands` so sushi.zsh's wrapper function does not have to keep a
 # second copy in sync — it got one wrong once and silently turned `sushi ignore`
 # into a picker search for the word "ignore".
-SUBCOMMANDS='scan add ignore delete rm list ls edit theme help choose version'
+SUBCOMMANDS='scan add ignore delete rm list ls edit theme themes help choose version'
 
 die()  { printf 'sushi: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'sushi: %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# ~/.ssh/config reads better than /Users/you/.ssh/config, and is what someone
+# would type back at you.
+tilde() {
+  local d="$1"
+  # shellcheck disable=SC2088  # a literal ~ is what we want to display
+  case "$d" in "$HOME"/*) d="~/${d#"$HOME"/}" ;; esac
+  printf '%s\n' "$d"
+}
 
 # --------------------------------------------------------------------------- theme --
 #
@@ -214,16 +233,47 @@ theme_read() {
 #   ~/.config/sushi/themes/<name>.yaml  yours, and survives a `git pull`
 #   <clone>/themes/<name>.yaml          the ones sushi ships
 # XDG_CONFIG_HOME is honoured where it is set.
+# The search path, in precedence order, one per line. One definition, so
+# theme_find, `sushi themes` and `sushi theme` can never disagree about where
+# themes live — a list like this in three places is a list that goes stale.
+theme_dirs() {
+  [ -n "${SUSHI_THEME_DIR:-}" ] && printf '%s\n' "$SUSHI_THEME_DIR"
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/sushi/themes"
+  printf '%s\n' "$(dirname "$SELF")/themes"
+}
+
+# Just the names, deduplicated, for completion. A shadowed duplicate is the
+# same word to type, so it appears once.
+theme_names() {
+  local dir f name ext seen=" "
+  while IFS= read -r dir; do
+    [ -d "$dir" ] || continue
+    set -- "$dir"/*.yaml "$dir"/*.yml
+    for f in "$@"; do
+      [ -f "$f" ] || continue
+      name="${f##*/}"; for ext in .yaml .yml; do name="${name%$ext}"; done
+      case "$seen" in *" $name "*) continue ;; esac
+      seen="$seen$name "
+      printf '%s\n' "$name"
+    done
+  done <<EOF
+$(theme_dirs)
+EOF
+  # sushi is the built-in and needs no file to exist; none is always available
+  case "$seen" in *" sushi "*) : ;; *) printf 'sushi\n' ;; esac
+  printf 'none\n'
+}
+
 theme_find() {
   local name="$1" dir ext
-  for dir in "${SUSHI_THEME_DIR:-}" \
-             "${XDG_CONFIG_HOME:-$HOME/.config}/sushi/themes" \
-             "$(dirname "$SELF")/themes"; do
+  while IFS= read -r dir; do
     [ -n "$dir" ] || continue
     for ext in yaml yml; do
       [ -f "$dir/$name.$ext" ] && { printf '%s\n' "$dir/$name.$ext"; return 0; }
     done
-  done
+  done <<EOF
+$(theme_dirs)
+EOF
   return 1
 }
 
@@ -1831,9 +1881,8 @@ cmd_preview() {
           ($7 != "" ? when($7) "  (" since($7) ")" : ($6 + 0 > 0 ? "unknown" : "never")), z
       }'
 
-  local disp="$CONFIG"
-  # shellcheck disable=SC2088  # a literal ~ is what we want to display
-  case "$disp" in "$HOME"/*) disp="~/${disp#"$HOME"/}" ;; esac
+  local disp
+  disp="$(tilde "$CONFIG")"
   printf '\n  %sstanza in %s%s\n' "$C_HEADING" "$disp" "$C_OFF"
   flatten_config "$CONFIG" 2>/dev/null | AWK -v a="$a" -v d="$C_MUTED" -v z="$C_OFF" '
     { k = tolower($1) }
@@ -2188,12 +2237,187 @@ cmd_pick() {
   exec ssh "$rec"
 }
 
+# Every theme on the search path, grouped by directory so precedence is visible
+# rather than something you have to know: the first `ansi.yaml` down the list is
+# the one you get, and any later one is marked shadowed.
+cmd_themes() {
+  local dir ext f name seen=" " shadow=""
+  while IFS= read -r dir; do
+    [ -d "$dir" ] || continue
+    set -- "$dir"/*.yaml "$dir"/*.yml
+    # a glob that matched nothing comes back as itself, so an empty dir prints
+    # a heading and nothing else — which is still worth showing, since "your
+    # themes go here" is half the question
+    printf '%s%s%s\n' "$C_HEADING" "$(tilde "$dir")" "$C_OFF"
+    for f in "$@"; do
+      [ -f "$f" ] || continue
+      name="${f##*/}"; for ext in .yaml .yml; do name="${name%$ext}"; done
+      case "$seen" in
+        *" $name "*) shadow=" $(tilde "$(theme_find "$name")")" ;;
+        *) seen="$seen$name "; shadow="" ;;
+      esac
+      if [ "$f" = "$THEME_SOURCE" ] || \
+         { [ "$THEME_SOURCE" = built-in ] && [ "$name" = sushi ] && [ -z "$shadow" ]; }; then
+        printf '  %s*%s %s%-12s%s %sactive%s\n' \
+            "$C_PROMPT" "$C_OFF" "$C_VALUE" "$name" "$C_OFF" "$C_MUTED" "$C_OFF"
+      elif [ -n "$shadow" ]; then
+        printf '    %s%-12s%s %sshadowed by%s%s\n' \
+            "$C_MUTED" "$name" "$C_OFF" "$C_MUTED" "$shadow" "$C_OFF"
+      else
+        printf '    %s%s%s\n' "$C_VALUE" "$name" "$C_OFF"
+      fi
+    done
+  done <<EOF
+$(theme_dirs)
+EOF
+  printf '\n  %ssushi theme set%s to pick one and keep it, %sSUSHI_THEME=<name> ssh%s to\n' \
+      "$C_ACCENT" "$C_OFF" "$C_ACCENT" "$C_OFF"
+  printf '  try one without keeping it.\n'
+}
+
+# `sushi theme set` with no name: choose one by looking at it. The preview pane
+# renders the palette and a few real rows of your own host table in that theme,
+# which is the only honest way to answer "does this work in my terminal" —
+# a hex value in a list tells you nothing about how it sits next to your
+# background. Prints the chosen name; empty when the picker was dismissed.
+theme_pick() {
+  local out
+  have fzf || { warn "no fzf, so no picker — try: sushi theme set <name>"; return 1; }
+  out="$(theme_names \
+    | FZF --reverse --border \
+          --prompt='theme ❯ ' \
+          --preview="SUSHI_THEME={} '$SELF' __themepreview" \
+          --preview-window='right:60%')" || return 0
+  printf '%s\n' "$out"
+}
+
+# The preview pane for one theme. Its own subcommand rather than a shell
+# one-liner inside the --preview string: quoting a two-command pipeline through
+# fzf, sh and bash is how you end up with a preview that silently prints
+# nothing, and this is testable.
+cmd_theme_preview() {
+  local rows
+  printf '  %s%s%s\n' "$C_VALUE" "${THEME_NAME:-none}" "$C_OFF"
+  case "$THEME_SOURCE" in
+    built-in) printf '  %sbuilt in, no file%s\n' "$C_MUTED" "$C_OFF" ;;
+    *) printf '  %s%s%s\n' "$C_MUTED" "$(tilde "$THEME_SOURCE")" "$C_OFF" ;;
+  esac
+  theme_roles '' '' '' '' '' ''
+  # the real host table, so you are judging the thing you will actually look at.
+  # Column 2 is the record fzf hides with --with-nth=1; hide it here too.
+  rows="$(picker_lines "" 2>/dev/null | cut -f1 | head -6)"
+  [ -n "$rows" ] || return 0
+  printf '\n  %ssample%s\n' "$C_HEADING" "$C_OFF"
+  printf '%s\n' "$rows" | sed 's/^/  /'
+}
+
+# Persist a theme choice by writing `export SUSHI_THEME=` into the shell rc.
+#
+# Two things this has to get right, both learned from the ~/.ssh/config path:
+# never destroy what is already in the file, and be idempotent — running it
+# twice must leave one line, not two.
+#
+# The line goes OUTSIDE install.sh'"'"'s `# >>> sushi >>>` block, immediately above
+# it. Inside would read more tidily and would be wrong: install.sh rewrites
+# everything between its markers on every run, so a theme set today would
+# vanish the next time anyone re-ran the installer.
+cmd_theme_set() {
+  local name="${1:-}" rc file body stray
+  case "$name" in
+    "") name="$(theme_pick)" || return 1
+        [ -n "$name" ] || return 0 ;;    # escaped out of the picker: change nothing
+    -*) die "unknown option: $name" ;;
+  esac
+
+  # Refuse to persist something that will not resolve tomorrow morning. A path
+  # is stored as given (an absolute one, so it still works from anywhere).
+  case "$name" in
+    none|sushi) : ;;
+    */*|*.yaml|*.yml)
+      file="${name/#\~/$HOME}"
+      [ -r "$file" ] || die "cannot read $file"
+      case "$file" in /*) name="$file" ;; *) name="$PWD/$file" ;; esac ;;
+    *) theme_find "$name" >/dev/null || die "no theme named $name — try: sushi themes" ;;
+  esac
+
+  rc="${SUSHI_RC:-${ZDOTDIR:-$HOME}/.zshrc}"
+  [ -e "$rc" ] || : > "$rc" || die "cannot write $rc"
+  [ -w "$rc" ] || die "cannot write $rc"
+  cp "$rc" "$rc.sushi-backup" || die "could not back up $rc"
+
+  # Any SUSHI_THEME the user set by hand elsewhere in the file would fight this
+  # one — silently, since whichever runs last wins. Say so rather than leaving
+  # them to find out.
+  stray="$(AWK -v b="$THEME_BEGIN" -v e="$THEME_END" '
+    index($0, b) { f = 1; next } index($0, e) { f = 0; next }
+    !f && /^[ \t]*(export[ \t]+)?SUSHI_THEME=/ { print FNR ": " $0 }' "$rc")"
+  [ -n "$stray" ] && printf 'sushi: replacing an existing SUSHI_THEME in %s:\n%s\n' \
+      "$(tilde "$rc")" "$stray" >&2
+
+  body="$(mktemp "${TMPDIR:-/tmp}/sushi-rc.XXXXXX")" || die "mktemp failed"
+  # strip our own block and any hand-written assignment, then put one back
+  AWK -v b="$THEME_BEGIN" -v e="$THEME_END" '
+    index($0, b) { f = 1; next } index($0, e) { f = 0; next }
+    f { next }
+    /^[ \t]*(export[ \t]+)?SUSHI_THEME=/ { next }
+    { print }' "$rc" > "$body"
+
+  if [ "$name" = sushi ]; then
+    # the built-in is what you get with nothing set, so the honest way to
+    # choose it is to leave no line behind
+    cat "$body" > "$rc"
+    rm -f "$body"
+    printf 'Using the built-in theme: removed SUSHI_THEME from %s (backup: %s)\n' \
+        "$(tilde "$rc")" "$(tilde "$rc.sushi-backup")"
+  else
+    AWK -v b="$INSTALL_BEGIN" -v t="$THEME_BEGIN" -v z="$THEME_END" -v n="$name" '
+      function block() {
+        print t
+        print "# `sushi theme set` wrote this. Outside the block below on purpose:"
+        print "# install.sh rewrites everything between its own markers."
+        print "export SUSHI_THEME=" n
+        print z
+      }
+      index($0, b) && !done { block(); done = 1 }
+      { print }
+      END { if (!done) { print ""; block() } }
+    ' "$body" > "$rc.tmp" && mv "$rc.tmp" "$rc"
+    rm -f "$body"
+    printf 'Wrote export SUSHI_THEME=%s to %s (backup: %s)\n' \
+        "$name" "$(tilde "$rc")" "$(tilde "$rc.sushi-backup")"
+  fi
+  printf 'New shells pick that up; for this one:  source %s\n\n' "$(tilde "$rc")"
+
+  # Show the result in its own colours — the point of choosing a theme is to
+  # look at it, and re-running ourselves is the only way to load one after the
+  # palette has already been set up.
+  SUSHI_THEME="$name" exec "$SELF" theme
+}
+
+# The six roles, each printed in its own colour. $1..$6 are the descriptions, so
+# the fzf preview can pass empty ones and stay inside a narrow pane.
+theme_roles() {
+  printf '\n  %sroles%s\n' "$C_HEADING" "$C_OFF"
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" accent  "$C_OFF" "$C_ACCENT"  "$S_ACCENT"  "$C_OFF" "$1"
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" heading "$C_OFF" "$C_HEADING" "$S_HEADING" "$C_OFF" "$2"
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" prompt  "$C_OFF" "$C_PROMPT"  "$S_PROMPT"  "$C_OFF" "$3"
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" target  "$C_OFF" "$C_TARGET"  "$S_TARGET"  "$C_OFF" "$4"
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" value   "$C_OFF" "$C_VALUE"   "$S_VALUE"   "$C_OFF" "$5"
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" muted   "$C_OFF" "$C_MUTED"   "$S_MUTED"   "$C_OFF" "$6"
+}
+
 # Which theme you got, where it came from, and what is in it — the answer to
 # "I edited a yaml file and nothing changed", which is nearly always that the
 # file is somewhere theme_find does not look, or that SUSHI_THEME still says
 # something else.
 cmd_theme() {
   local dir
+  case "${1:-}" in
+    list|--list|-l) cmd_themes; return $? ;;
+    set)            shift; cmd_theme_set "${1:-}"; return $? ;;
+    "")             : ;;
+    *)              die "usage: sushi theme [list | set [<name>]]" ;;
+  esac
   printf '%s%s%s\n' "$C_VALUE" "${THEME_NAME:-none}" "$C_OFF"
   printf '  %s%-9s%s %s\n' "$C_MUTED" 'source' "$C_OFF" "$THEME_SOURCE"
   [ "$THEME_SOURCE" = built-in ] || printf '  %s%-9s%s %s\n' \
@@ -2203,13 +2427,9 @@ cmd_theme() {
         "$C_MUTED" "$C_OFF"
     return 0
   fi
-  printf '\n  %sroles%s\n' "$C_HEADING" "$C_OFF"
-  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" accent  "$C_OFF" "$C_ACCENT"  "$S_ACCENT"  "$C_OFF" 'match highlights, markers, key paths'
-  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" heading "$C_OFF" "$C_HEADING" "$S_HEADING" "$C_OFF" 'headers and section labels'
-  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" prompt  "$C_OFF" "$C_PROMPT"  "$S_PROMPT"  "$C_OFF" 'the `imported` tag'
-  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" target  "$C_OFF" "$C_TARGET"  "$S_TARGET"  "$C_OFF" 'the resolved target in the preview'
-  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" value   "$C_OFF" "$C_VALUE"   "$S_VALUE"   "$C_OFF" 'aliases and values'
-  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" muted   "$C_OFF" "$C_MUTED"   "$S_MUTED"   "$C_OFF" 'ages, keys, everything secondary'
+  theme_roles 'match highlights, markers, key paths' 'headers and section labels' \
+              'the `imported` tag' 'the resolved target in the preview' \
+              'aliases and values' 'ages, keys, everything secondary'
   printf '\n  %sfzf%s\n' "$C_HEADING" "$C_OFF"
   printf '%s\n' "$FZF_COLORS" | tr ',' '\n' | while IFS=: read -r k v; do
     [ -n "$k" ] || continue
@@ -2218,12 +2438,14 @@ cmd_theme() {
   printf '    %s%-9s%s %s   %s%-9s%s %s\n' \
       "$C_MUTED" pointer "$C_OFF" "$SYM_POINTER" "$C_MUTED" marker "$C_OFF" "$SYM_MARKER"
   printf '\n  %ssearched%s\n' "$C_HEADING" "$C_OFF"
-  for dir in "${SUSHI_THEME_DIR:-}" \
-             "${XDG_CONFIG_HOME:-$HOME/.config}/sushi/themes" \
-             "$(dirname "$SELF")/themes"; do
+  while IFS= read -r dir; do
     [ -n "$dir" ] || continue
-    printf '    %s%s%s\n' "$C_MUTED" "$dir" "$C_OFF"
-  done
+    printf '    %s%s%s\n' "$C_MUTED" "$(tilde "$dir")" "$C_OFF"
+  done <<EOF
+$(theme_dirs)
+EOF
+  printf '\n  %ssushi theme list%s shows them all, %ssushi theme set%s picks one and keeps it.\n' \
+      "$C_ACCENT" "$C_OFF" "$C_ACCENT" "$C_OFF"
 }
 
 usage() {
@@ -2264,6 +2486,8 @@ $a"; done
   __pickerfeed)      shift; picker_feed "${1:-}" ;;  # internal: header + rows, for reload
   __aliases)         config_hosts | AWK -F'\t' '{ print $1 }' | sort -f ;;  # for completion
   __fzfhint)         fzf_install_cmd; printf '\n' ;;   # internal: install.sh reuses this
+  __themes)          theme_names ;;                # internal: theme names, for completion
+  __themepreview)    cmd_theme_preview ;;          # internal: theme picker's preview pane
   __fzfreload)       fzf_reload_action; printf '\n' ;;  # internal: which reload ctrl-s gets
   __subcommands)     printf '%s\n' "$SUBCOMMANDS" | tr ' ' '\n' ;;
   __scanmenu)        scan_menu ;;                # internal: scan picker's fzf input
@@ -2273,7 +2497,8 @@ $a"; done
   __pend)            shift; pend_add "$@" ;;     # internal: note a ctrl-x dismissal
   __candidates)      scan_history ;;             # internal: raw history scan
   __extract)         extract_stream ;;          # internal: history lines -> records
-  theme)             cmd_theme ;;
+  theme)             shift; cmd_theme "$@" ;;
+  themes)            cmd_themes ;;                 # alias for `theme list`
   edit)              exec "${EDITOR:-vi}" "$CONFIG" ;;
   help|-h|--help)    usage ;;
   version|--version|-V) cmd_version ;;
