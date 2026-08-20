@@ -142,6 +142,18 @@ SUSHI_SCAN_CACHE=/tmp/c SUSHI_SCAN_PENDING=/tmp/p ./sushi __menucache
 process — a counter incremented inside it never reaches the caller. That bit us once with the
 ignore-list tally. Filter and count in the caller's loop, where the body runs in the current shell.
 
+**Themes are parsed in bash on purpose.** `theme_read` is a hand-rolled slice of YAML — comments,
+`key: value`, one level of indent under `fzf:` and `symbols:` — and it stays that way. The loader
+runs on every invocation, including once per row the fzf preview redraws, so shelling out to a yaml
+tool (or even to awk) would put a fork on that path, and requiring one would end "no dependencies
+beyond fzf". Keep it fork-free: `printf -v`, not `$(...)`. The built-in palette is the same YAML,
+embedded in the script, so a file and the default share one code path — `themes/sushi.yaml` is a
+copy of it and the suite diffs the two, so edit both or neither. New roles need an entry in
+`theme_read`, `cmd_theme` and both copies of the default.
+
+**A broken theme must not break ssh.** Every parse failure warns and carries on with what it has.
+sushi is how someone reaches a server; a typo in a colour is not a reason to stop them.
+
 **Add a test with the fix.** `test/run.sh` needs no fzf and no terminal — it builds throwaway
 `$HOME`s and asserts on output. Copy the nearest existing section; the helpers are `assert_eq`,
 `assert_has` and `assert_lacks`.
@@ -171,6 +183,10 @@ sushi __ignoresplit      # ignore-picker selection on stdin -> P/D instructions
 sushi __aliases          # alias names only, for completion
 sushi __fzfhint          # the platform's fzf install command (install.sh reuses it)
 ```
+
+`sushi theme` is not hidden, but it belongs in the same list: it prints the resolved palette, the
+file it came from, and every directory that was searched — which answers most of "I edited the yaml
+and nothing changed".
 
 Point them at a fixture rather than your real history:
 
