@@ -1708,6 +1708,118 @@ assert_has "and falls back to the built-in"    "alpha"                      "$ou
 out="$(theme "$TH/nothere.yaml" __lines)"
 assert_has "an unreadable theme file says so"  "cannot read theme"          "$out"
 
+# --------------------------------------------------------------------------
+# `sushi theme list` / `sushi themes`
+
+printf 'name: only-here\n' > "$TH/only.yaml"
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" "$SUSHI" themes 2>&1)"
+assert_has "themes lists what it found"        "only"   "$out"
+assert_has "and the directory it came from"    "$TH"    "$out"
+assert_has "and the shipped ones"              "ansi"   "$out"
+assert_eq  "sushi themes == sushi theme list" \
+           "$(HOME="$H" SUSHI_THEME_DIR="$TH" "$SUSHI" themes 2>&1)" \
+           "$(HOME="$H" SUSHI_THEME_DIR="$TH" "$SUSHI" theme list 2>&1)"
+
+# the active one is marked, wherever it came from
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" SUSHI_THEME=only "$SUSHI" themes 2>&1 \
+       | sed "s/${esc}\[[0-9;]*m//g" | grep only)"
+assert_has "the active theme is marked" "active" "$out"
+out="$(HOME="$H" "$SUSHI" themes 2>&1 | sed "s/${esc}\[[0-9;]*m//g" | grep ' sushi')"
+assert_has "and the built-in counts as active" "active" "$out"
+
+# precedence is shown, not just applied: a name found twice is called shadowed
+cp "$TH/only.yaml" "$H/.config/sushi/themes/only.yaml"
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" "$SUSHI" themes 2>&1 | sed "s/${esc}\[[0-9;]*m//g")"
+assert_has "a shadowed duplicate says so"      "shadowed by" "$out"
+assert_eq  "and the name is still offered once" "1" \
+           "$(HOME="$H" SUSHI_THEME_DIR="$TH" "$SUSHI" __themes | grep -c '^only$' | tr -d ' ')"
+rm -f "$H/.config/sushi/themes/only.yaml"
+
+# --------------------------------------------------------------------------
+# `sushi theme set`
+
+RC="$WORK/rc"
+rcset() { HOME="$H" SUSHI_THEME_DIR="$TH" SUSHI_RC="$RC" "$SUSHI" theme set "$@" 2>&1; }
+newrc() {
+  printf 'export KEEP=1\n%s\n: ${SUSHI_MODE:=key,enter}\nsource "/x/sushi.zsh"\n%s\n' \
+      '# >>> sushi >>>' '# <<< sushi <<<' > "$RC"
+}
+
+newrc
+out="$(rcset ansi)"
+assert_has "theme set says what it wrote"   "SUSHI_THEME=ansi" "$out"
+assert_has "and where the backup went"      "rc.sushi-backup"  "$out"
+assert_has "and how to pick it up now"      "source"           "$out"
+assert_has "export SUSHI_THEME lands in the rc" "export SUSHI_THEME=ansi" "$(cat "$RC")"
+assert_has "the rest of the file survives"      "export KEEP=1"           "$(cat "$RC")"
+assert_has "so does the install.sh block"       ": \${SUSHI_MODE:=key,enter}" "$(cat "$RC")"
+
+# the line has to sit ABOVE install.sh's block: install.sh rewrites everything
+# between its own markers, so a theme set inside it would vanish on re-install
+theme_at="$(grep -n 'export SUSHI_THEME=' "$RC" | cut -d: -f1)"
+block_at="$(grep -n '# >>> sushi >>>' "$RC" | cut -d: -f1)"
+assert_eq "the theme line is outside install.sh's block" "yes" \
+          "$([ "$theme_at" -lt "$block_at" ] && echo yes || echo no)"
+
+# and prove it: re-running install.sh must not take the theme with it
+IH2="$(newhome rcinstall)"; cp "$RC" "$IH2/.zshrc"
+HOME="$IH2" "$ROOT/install.sh" >/dev/null 2>&1
+assert_has "install.sh leaves the theme line alone" "export SUSHI_THEME=ansi" "$(cat "$IH2/.zshrc")"
+assert_eq  "and there is still exactly one of it" "1" \
+           "$(grep -c 'export SUSHI_THEME=' "$IH2/.zshrc" | tr -d ' ')"
+
+# idempotent, like every other write in this project
+rcset ansi >/dev/null; rcset only >/dev/null
+assert_eq "setting it twice leaves one line" "1" \
+          "$(grep -c 'export SUSHI_THEME=' "$RC" | tr -d ' ')"
+assert_eq "and it is the last one set" "export SUSHI_THEME=only" \
+          "$(grep 'export SUSHI_THEME=' "$RC")"
+assert_eq "with one marker block, not two" "1" \
+          "$(grep -c '>>> sushi theme >>>' "$RC" | tr -d ' ')"
+
+# a hand-written assignment elsewhere in the file would fight ours, silently
+newrc; printf 'export SUSHI_THEME=handwritten\n' >> "$RC"
+out="$(rcset ansi)"
+assert_has "a hand-written SUSHI_THEME is reported" "replacing an existing" "$out"
+assert_eq  "and removed, so only one wins" "1" \
+           "$(grep -c 'export SUSHI_THEME=' "$RC" | tr -d ' ')"
+
+# `set sushi` means "the built-in", which is what no line at all means
+rcset sushi >/dev/null
+assert_lacks "set sushi removes the line rather than writing a redundant one" \
+             "SUSHI_THEME" "$(cat "$RC")"
+assert_has   "and the file is otherwise intact" "export KEEP=1" "$(cat "$RC")"
+
+# none is a real choice and has to be storable
+rcset none >/dev/null
+assert_has "set none is written like any other" "export SUSHI_THEME=none" "$(cat "$RC")"
+
+# a path is stored absolute, so it still resolves from another directory
+newrc; rcset "$TH/only.yaml" >/dev/null
+assert_has "a path is stored as an absolute path" "export SUSHI_THEME=$TH/only.yaml" "$(cat "$RC")"
+
+# refuse to persist something that will not resolve tomorrow
+newrc
+out="$(rcset nosuchtheme)"
+assert_has  "an unknown name is refused"      "no theme named" "$out"
+assert_lacks "and nothing is written"         "SUSHI_THEME"    "$(cat "$RC")"
+out="$(rcset "$TH/missing.yaml")"
+assert_has  "an unreadable file is refused"   "cannot read"    "$out"
+assert_lacks "and still nothing is written"   "SUSHI_THEME"    "$(cat "$RC")"
+
+# no rc file yet is not an error — that is a fresh machine
+rm -f "$RC"
+rcset ansi >/dev/null
+assert_has "a missing rc file is created" "export SUSHI_THEME=ansi" "$(cat "$RC")"
+
+# the picker's preview pane has to render without a terminal or fzf
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" SUSHI_THEME=only "$SUSHI" __themepreview 2>&1)"
+assert_has "the preview names the theme"        "only"   "$out"
+assert_has "and shows the roles"                "accent" "$out"
+assert_has "and real rows to judge it by"       "alpha"  "$out"
+assert_lacks "with the hidden record column cut" "$(printf '\t')" "$out"
+
+# --------------------------------------------------------------------------
 # SUSHI_THEME=none still wins over everything, including a file that exists
 out="$(HOME="$H" SUSHI_THEME=none "$SUSHI" theme 2>&1)"
 assert_lacks "SUSHI_THEME=none emits no escapes from theme" "${esc}[" "$out"
@@ -1811,6 +1923,11 @@ if command -v zsh >/dev/null 2>&1; then
   assert_eq "compdef registers _sushi for sushi" "_sushi" "$(zcprobe key 'print $_comps[sushi]')"
   assert_eq "and the function exists"            "1"      "$(zcprobe key 'print ${+functions[_sushi]}')"
   assert_eq "so does the host helper"            "1"      "$(zcprobe key 'print ${+functions[_sushi_aliases]}')"
+  assert_eq "and the theme helper"               "1"      "$(zcprobe key 'print ${+functions[_sushi_themes]}')"
+  # completion for theme names reads them from the engine, so a file dropped in
+  # ~/.config/sushi/themes is completable without touching sushi.zsh
+  assert_has "theme names come from the engine" "ansi" \
+             "$(zcprobe key '"$SUSHI_BIN" __themes | tr "\n" " "')"
 
   # off mode means "no key bindings, do not touch ssh" — not "a worse `sushi`"
   assert_eq "off mode still gets completion" "_sushi" "$(zcprobe off 'print $_comps[sushi]')"

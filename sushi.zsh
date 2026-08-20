@@ -146,6 +146,15 @@ if (( $+functions[compdef] )); then
     (( $#hosts )) && _describe -t hosts 'host' hosts
   }
 
+  # Theme names come from the engine for the same reason the subcommand list
+  # does: a copy kept here would go stale the first time someone dropped a file
+  # in ~/.config/sushi/themes.
+  _sushi_themes() {
+    local -a names
+    names=(${(f)"$("$SUSHI_BIN" __themes 2>/dev/null)"})
+    (( $#names )) && _describe -t themes 'theme' names
+  }
+
   _sushi() {
     local -a subs
     if (( CURRENT == 2 )); then
@@ -155,6 +164,8 @@ if (( $+functions[compdef] )); then
         'ignore:stop scan offering something, or drop an imported host'
         'list:print the host table'
         'edit:open the ssh config in $EDITOR'
+        'theme:show the active theme, or list and set themes'
+        'themes:list every theme on the search path'
         'choose:print the chosen alias instead of connecting'
         'help:show usage'
         '--version:print the version'
@@ -187,6 +198,16 @@ if (( $+functions[compdef] )); then
         ;;
       choose)
         _sushi_aliases
+        ;;
+      theme)
+        # `theme` alone shows the active one; the verbs are what needs completing
+        if (( CURRENT == 3 )); then
+          _describe -t commands 'theme command' \
+            'list:show every theme on the search path
+set:pick a theme in fzf and keep it'
+        elif [[ ${words[3]} == set ]]; then
+          _sushi_themes
+        fi
         ;;
     esac
   }

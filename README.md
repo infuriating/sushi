@@ -105,9 +105,9 @@ alias you have so the ages stay in line:
   than inventing a date.
 
 Other commands: `sushi list` prints the host table, `sushi edit` opens the config,
-`sushi theme` shows the palette in force and where to put your own, `sushi choose` prints an alias
-instead of connecting (useful for your own scripts), and `sushi --version` says which build you are
-on (plus the commit, since `git pull` is the update).
+`sushi theme` shows the palette in force (`theme list` and `theme set` for the rest), `sushi choose`
+prints an alias instead of connecting (useful for your own scripts), and `sushi --version` says which
+build you are on (plus the commit, since `git pull` is the update).
 
 `sushi <TAB>` completes subcommands and your imported aliases. `ssh <TAB>` is deliberately left
 alone: sushi writes real `Host` stanzas, so zsh's own `_ssh` already knows every alias — that is
@@ -194,12 +194,31 @@ through rather than being painted over.
 That palette is a YAML file, so it is not the one you have to live with:
 
 ```bash
-sushi theme                              # what you are running, and where to put your own
+sushi theme set     # pick one in fzf, previewing each against your own hosts, and keep it
+```
+
+That is the whole loop. `theme set` opens a picker of every theme it can find; the preview pane
+renders that theme's palette and the first rows of your own host table in it, so you are judging the
+thing you will actually look at rather than a list of hex values. Choosing one writes
+`export SUSHI_THEME=<name>` into your `~/.zshrc` and prints what it did. `theme set <name>` skips
+the picker, and `theme set sushi` goes back to the built-in by removing the line again.
+
+The rest of the surface:
+
+```bash
+sushi theme         # what you are running, where it came from, and what is in it
+sushi theme list    # every theme found, grouped by directory so precedence is visible
+SUSHI_THEME=ansi ssh   # try one without keeping it
+```
+
+To write your own, copy the shipped one and edit it — `~/.config/sushi/themes` is searched before
+the clone, so your files survive a `git pull`:
+
+```bash
 mkdir -p ~/.config/sushi/themes
 cp ~/sushi/themes/sushi.yaml ~/.config/sushi/themes/mine.yaml
 $EDITOR ~/.config/sushi/themes/mine.yaml
-SUSHI_THEME=mine sushi theme             # see it before you commit to it
-echo 'export SUSHI_THEME=mine' >> ~/.zshrc
+SUSHI_THEME=mine sushi theme     # or just: sushi theme set, and look at it
 ```
 
 A theme names six roles and the fzf colours, and nothing else — there is no layout or keybinding in
@@ -235,6 +254,12 @@ ships `sushi` and `ansi` there, the second in terminal palette indexes so it fol
 scheme your terminal already has. `SUSHI_THEME=sushi` is the default and reads no file at all.
 Anything sushi cannot parse is named on stderr and skipped rather than taking the picker down with
 it — you can still reach your servers with a half-broken theme.
+
+The line `theme set` writes goes *above* the `# >>> sushi >>>` block in your `~/.zshrc`, not inside
+it: `install.sh` rewrites everything between its own markers on every run, so a theme kept in there
+would disappear the next time you re-ran the installer. It backs the file up first
+(`~/.zshrc.sushi-backup`), and if you already had a `SUSHI_THEME` line of your own it says so and
+replaces it rather than adding a second one that silently competes.
 
 Two escape hatches, for opting out rather than editing:
 
