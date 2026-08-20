@@ -6,17 +6,21 @@
 #   sushi <query>      open the picker pre-filtered
 #   sushi scan         discover user@host from shell history, import into ~/.ssh/config
 #   sushi scan -n      dry run: show what scan would add, write nothing
+#   sushi add <dest>   import one host by hand: sushi add deploy@web1.example.com
 #   sushi ignore       stop scan offering something (also: delete, rm)
 #   sushi ignore -l    show the ignore list
 #   sushi list         print the host table (no fzf needed)
 #   sushi edit         open ~/.ssh/config in $EDITOR
 #   sushi choose       print the chosen alias instead of connecting
+#   sushi --version    print the version
 #
 # Requires: bash 3.2+, awk, ssh. fzf only for the picker.
 # Shell integration (bare `ssh` opens the picker) lives in sushi.zsh.
 # Files: ~/.ssh/config (SUSHI_CONFIG), ~/.ssh/sushi-ignore (SUSHI_IGNORE)
 
 set -uo pipefail
+
+VERSION="0.1.0"
 
 SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 SSH_DIR="${SSH_DIR:-$HOME/.ssh}"
@@ -29,7 +33,7 @@ END_MARK="# <<< sushi managed hosts <<<"
 # `sushi __subcommands` so sushi.zsh's wrapper function does not have to keep a
 # second copy in sync — it got one wrong once and silently turned `sushi ignore`
 # into a picker search for the word "ignore".
-SUBCOMMANDS='scan ignore delete rm list ls edit help choose'
+SUBCOMMANDS='scan add ignore delete rm list ls edit help choose version'
 
 # --------------------------------------------------------------------------- theme --
 #
@@ -87,9 +91,58 @@ FZF() {
       ${FZF_USER_ARGS[@]+"${FZF_USER_ARGS[@]}"}
 }
 
+# Every awk in this file runs in the C locale.
+#
+# onetrueawk — what macOS ships — aborts the whole program the moment an input
+# byte sequence is not valid UTF-8 in the current locale:
+#
+#     awk: towc: multibyte conversion failure on: '...'
+#
+# and it does that mid-stream, so every record after the offending one is
+# silently lost rather than the run visibly failing. A shell history collects
+# bytes from everywhere — a truncated paste, a latin-1 filename, a stray 0xff —
+# so that is not a rare input, it is an inevitable one. In the C locale awk
+# treats input as bytes and cannot fail this way.
+#
+# Nothing is given up by it: every keyword awk matches here is ASCII, and hosts
+# and aliases are ASCII by the time they reach any of these programs. The locale
+# is set per-call rather than for the whole script on purpose — fzf draws the
+# picker with box-drawing characters, and LC_ALL=C would turn those into noise.
+AWK() { LC_ALL=C awk "$@"; }
+
 die()  { printf 'sushi: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'sushi: %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# ------------------------------------------------------------------ fzf check --
+
+# How to install fzf on THIS machine. "brew install fzf" was hardcoded, which is
+# useless advice on the majority of machines sushi runs on — and a wrong install
+# command is worse than none, because it sends you looking for the wrong problem.
+#
+# Order matters: brew first, because someone who has brew on Linux wants brew.
+fzf_install_cmd() {
+  if   have brew;    then printf 'brew install fzf'
+  elif have apt-get; then printf 'sudo apt install fzf'
+  elif have dnf;     then printf 'sudo dnf install fzf'
+  elif have yum;     then printf 'sudo yum install fzf'
+  elif have pacman;  then printf 'sudo pacman -S fzf'
+  elif have zypper;  then printf 'sudo zypper install fzf'
+  elif have apk;     then printf 'sudo apk add fzf'
+  elif have port;    then printf 'sudo port install fzf'
+  elif have pkg;     then printf 'sudo pkg install fzf'
+  elif have nix-env; then printf 'nix-env -iA nixpkgs.fzf'
+  else printf 'see https://github.com/junegunn/fzf#installation'
+  fi
+}
+
+# The one place that explains a missing fzf, so the wording and the install
+# command cannot drift apart between call sites.
+warn_no_fzf() {
+  warn "fzf not found — the picker needs it."
+  warn "    $(fzf_install_cmd)"
+  warn "Meanwhile: 'sushi list' shows your hosts and 'sushi scan' still imports."
+}
 
 # ---------------------------------------------------------------- ssh_config --
 
@@ -127,7 +180,7 @@ flatten_config() {
 # TSV: alias \t hostname \t user \t port
 config_hosts() {
   [ -r "$CONFIG" ] || return 0
-  flatten_config "$CONFIG" | awk '
+  flatten_config "$CONFIG" | AWK '
     function flush() {
       for (i = 1; i <= n; i++) {
         p = pat[i]
@@ -157,10 +210,25 @@ config_hosts() {
 # `IFS=$'\t' read` collapses `a<TAB><TAB>c` into two fields and empty columns
 # (a missing username, a default port) shift everything left.
 SEP='|'
+# A literal tab, for `IFS="$TAB" read` — writing $'\t' at each call site is easy
+# to misread as a two-character string.
+TAB=$'\t'
+
+# ESC on its own, deliberately outside the palette below: SUSHI_THEME=none blanks
+# every colour variable, and code that *strips* colours still needs the escape.
+ESC=$'\033'
 
 # Pull the destination out of one ssh command line.
 # echoes: user|host|port|identityfile|proxyjump   (any but host may be empty);
 # returns 1 if the line is not an ssh invocation.
+#
+# THE SLOW PATH, kept deliberately. extract_stream_awk below is the same grammar
+# in awk and is what runs by default: this one is ~160us per call, which on a
+# 20k-line history was ~450ms of a ~570ms scan — 80% of it. It stays because it
+# is the reference implementation the test suite diffs the awk against, and
+# because SUSHI_EXTRACT=bash is a way out if the awk ever disagrees on a history
+# nobody thought of. Change one, change both, and the differential test will tell
+# you if you did not.
 extract_dest() {
   local -a t
   # Deliberate word splitting — with globbing off, so a history line like
@@ -255,6 +323,155 @@ extract_dest() {
     "$user" "$SEP" "$host" "$SEP" "$port" "$SEP" "$identity" "$SEP" "$jump"
 }
 
+# The extractor, in awk: candidate history lines on stdin, one
+# user|host|port|identityfile|proxyjump record out per line that is an ssh
+# invocation. Lines that are not are dropped silently, exactly as extract_dest
+# returning 1 dropped them.
+#
+# This is a transcription of extract_dest, not a reinterpretation — including the
+# prefix stripping its caller used to do, which had to move in here to keep the
+# whole thing one pass. The test suite diffs the two implementations over a
+# corpus of ~11k lines and requires byte-identical output, so read the two side
+# by side if you touch either.
+#
+# Why it exists: a bash function call per history line is ~160us, and a shell
+# history is mostly not ssh. On a 20k-line history (2.8k lines containing "ssh")
+# the bash loop was ~570ms and this is ~55ms.
+#
+# `-v q=`: the host may arrive wrapped in single quotes, and an awk program lives
+# inside a single-quoted shell string, so the character is passed in rather than
+# escaped into the source.
+extract_stream_awk() {
+  AWK -v q="'" -v sep="$SEP" '
+    function optarg(tok) { return (tok ~ /^-[bcDEeFLmOoQRSWw]$/) }
+    # index of the LAST occurrence of c, mirroring ${var##*c} / ${var%c*}
+    function lastidx(s, c,    k) {
+      for (k = length(s); k >= 1; k--) if (substr(s, k, 1) == c) return k
+      return 0
+    }
+    {
+      line = $0
+      # zsh EXTENDED_HISTORY:  ": 1699999999:0;cmd"
+      if (substr(line, 1, 1) == ":" && index(line, ";") > 0)
+        line = substr(line, index(line, ";") + 1)
+      # fish:  "- cmd: ssh ..."
+      sub(/^- cmd: /, "", line)
+      # take the last segment of pipes/&&/; so `foo && ssh bar` still counts.
+      # `.*` is greedy, which is what makes these the ${var##*...} they replace.
+      sub(/^.*&& /, "", line)
+      sub(/^.*; /, "", line)
+      sub(/^.*\| /, "", line)
+
+      # bash word splitting ignores leading/trailing IFS and collapses runs;
+      # awk split() does not, so trim first or token 1 comes back empty.
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (line == "") next
+      n = split(line, t, /[ \t]+/)
+
+      # walk past the command word and the wrappers that may precede it
+      i = 1; bail = 0
+      while (i <= n) {
+        if (t[i] == "ssh" || t[i] ~ /\/ssh$/) { i++; break }
+        else if (t[i] == "sudo" || t[i] == "command" || t[i] == "time" || t[i] == "nohup") i++
+        else { bail = 1; break }
+      }
+      if (bail || i == 1) next
+
+      user = ""; host = ""; port = ""; id = ""; jump = ""
+      while (i <= n) {
+        tok = t[i]
+        if      (tok == "-p")  { port = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-p./) { port = substr(tok, 3); i++ }
+        else if (tok == "-l")  { user = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-l./) { user = substr(tok, 3); i++ }
+        # worth keeping rather than skipping: these belong in the imported stanza
+        else if (tok == "-i")  { id   = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-i./) { id   = substr(tok, 3); i++ }
+        else if (tok == "-J")  { jump = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-J./) { jump = substr(tok, 3); i++ }
+        # other options that consume the next argument
+        else if (optarg(tok))  { i += 2 }
+        else if (tok ~ /^-/)   { i++ }
+        else                   { host = tok ""; i++; break }
+      }
+
+      # history keeps the quotes you typed: ssh "deploy@host"
+      sub(/"$/, "", host); sub(/^"/, "", host)
+      if (substr(host, length(host), 1) == q) host = substr(host, 1, length(host) - 1)
+      if (substr(host, 1, 1) == q) host = substr(host, 2)
+      if (host == "") next
+
+      # OpenSSH also accepts options *after* the destination: `ssh host -p 2222`
+      while (i <= n) {
+        tok = t[i]
+        if      (tok == "-p")  { if (port == "") port = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-p./) { if (port == "") port = substr(tok, 3); i++ }
+        else if (tok == "-l")  { if (user == "") user = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-l./) { if (user == "") user = substr(tok, 3); i++ }
+        else if (tok == "-i")  { if (id   == "") id   = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-i./) { if (id   == "") id   = substr(tok, 3); i++ }
+        else if (tok == "-J")  { if (jump == "") jump = t[i+1] "";      i += 2 }
+        else if (tok ~ /^-J./) { if (jump == "") jump = substr(tok, 3); i++ }
+        else if (optarg(tok))  { i += 2 }
+        else if (tok ~ /^-/)   { i++ }
+        else break   # remote command — stop
+      }
+
+      # ssh://user@host:port/
+      if (host ~ /^ssh:\/\//) {
+        host = substr(host, 7)
+        if (index(host, "/") > 0) host = substr(host, 1, index(host, "/") - 1)
+        p = lastidx(host, ":")
+        if (p > 0) { port = substr(host, p + 1); host = substr(host, 1, p - 1) }
+      }
+      p = lastidx(host, "@")
+      if (p > 0) { user = substr(host, 1, p - 1); host = substr(host, p + 1) }
+      sub(/:$/, "", host)
+
+      # plausibility. The bash original also rejected slashes, globs, quotes and
+      # a leading dash or dot separately; this regex is strictly stricter than all
+      # of that, so it is the only check needed.
+      if (host !~ /^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/) next
+      if (user !~ /^[A-Za-z0-9._-]*$/) user = ""
+      # ^[0-9]{1,5}$ without an interval expression: onetrueawk has no {n,m}
+      if (port !~ /^[0-9]+$/ || length(port) > 5) port = ""
+
+      # These end up verbatim in ~/.ssh/config, so anything that is not plainly a
+      # path / a destination gets dropped rather than written out.
+      sub(/"$/, "", id); sub(/^"/, "", id)
+      if (id ~ /[^A-Za-z0-9._\/~-]/) id = ""
+      sub(/"$/, "", jump); sub(/^"/, "", jump)
+      if (jump ~ /[^A-Za-z0-9._@:-]/) jump = ""
+
+      print user sep host sep port sep id sep jump
+    }'
+}
+
+# The same contract as extract_stream_awk, via the bash extract_dest above.
+extract_stream_bash() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    # zsh EXTENDED_HISTORY:  ": 1699999999:0;cmd"
+    case "$line" in ':'*';'*) line="${line#*;}" ;; esac
+    # fish:  "- cmd: ssh ..."
+    case "$line" in '- cmd: '*) line="${line#- cmd: }" ;; esac
+    # take the last segment of pipes/&&/; so `foo && ssh bar` still counts
+    line="${line##*&& }"; line="${line##*; }"; line="${line##*| }"
+    extract_dest "$line" 2>/dev/null
+  done
+  return 0
+}
+
+# SUSHI_EXTRACT=bash falls back to the reference implementation. It is ~10x
+# slower and exists as an escape hatch, not as a supported mode.
+extract_stream() {
+  if [ "${SUSHI_EXTRACT:-awk}" = bash ]; then
+    extract_stream_bash
+  else
+    extract_stream_awk
+  fi
+}
+
 history_files() {
   local f
   for f in "$HOME/.zsh_history" "$HOME/.bash_history" "$HOME/.history" \
@@ -275,21 +492,17 @@ scan_history() {
   done < <(history_files)
   [ "${#files[@]}" -gt 0 ] || return 0
 
-  # grep first, so the bash loop below only ever sees candidate lines. It is
-  # pure-builtin but still ~90us a line, and most of a shell history is not ssh
-  # — on a 20k-line history that is the difference between ~2s and ~100ms.
-  grep -hF ssh -- "${files[@]}" 2>/dev/null \
-    | while IFS= read -r line || [ -n "$line" ]; do
-      # zsh EXTENDED_HISTORY:  ": 1699999999:0;cmd"
-      case "$line" in ':'*';'*) line="${line#*;}" ;; esac
-      # fish:  "- cmd: ssh ..."
-      case "$line" in '- cmd: '*) line="${line#- cmd: }" ;; esac
-      # take the last segment of pipes/&&/; so `foo && ssh bar` still counts
-      line="${line##*&& }"; line="${line##*; }"; line="${line##*| }"
-      extract_dest "$line" 2>/dev/null
-    done \
+  # grep first, so the extractor only ever sees candidate lines: most of a shell
+  # history is not ssh, and on a 20k-line history this is the difference between
+  # ~2s and ~100ms even with the awk extractor doing the parsing.
+  # LC_ALL=C for the same reason as AWK(): GNU grep in a UTF-8 locale can decline
+  # to match inside a line whose bytes are not valid encoding, which would drop
+  # the ssh command sitting next to a bad paste. "ssh" is ASCII, so byte matching
+  # is strictly more inclusive and never less correct.
+  LC_ALL=C grep -hF ssh -- "${files[@]}" 2>/dev/null \
+    | extract_stream \
     | sort | uniq -c | sed 's/^ *//; s/ /|/' \
-    | awk -F'[|]' '
+    | AWK -F'[|]' '
         # Fold "same user@host, port unknown" rows into the port we did observe,
         # so `ssh -p 2022 x@h` and `ssh x@h` do not become two separate hosts.
         # identityfile / proxyjump: first non-empty wins. Input order is fixed by
@@ -337,33 +550,109 @@ scan_known_hosts() {
   local f
   for f in "$SSH_DIR/known_hosts" "$SSH_DIR/known_hosts2"; do
     [ -r "$f" ] || continue
-    awk '{ n = split($1, a, ","); for (i = 1; i <= n; i++) print a[i] }' "$f"
+    AWK '{ n = split($1, a, ","); for (i = 1; i <= n; i++) print a[i] }' "$f"
   done | grep -v '^|' | sed 's/^\[\(.*\)\]:.*$/\1/' | sort -u
 }
 
 # ------------------------------------------------------------------- aliasing --
 
-sanitize_alias() {
-  local host="$1" base
-  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    base="srv-${host//./-}"
-  else
-    base="${host%%.*}"
-  fi
-  printf '%s' "$(printf '%s' "$base" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._-' '-')"
+# Selected records on stdin (count|user|host|port|identity|jump), the finished
+# Host stanzas on stdout, with collision-free aliases.
+#
+# This used to be a bash loop, and it was by far the slowest thing sushi did:
+# a `sanitize_alias` command substitution (two more inside it) plus a
+# `printf | grep -Fxq` membership test per candidate — and a second one per
+# retry, against a string that grew with every host. Five-ish forks a candidate,
+# quadratic in the number of them: a dry run over 604 candidates took 9.5s, most
+# of it in the kernel.
+#
+# awk does it in one pass with a real hash, so nothing forks and nothing is
+# quadratic. The alias rules are unchanged: first-wins, then -<user>, then -2, -3.
+# $1 (optional) forces the alias instead of deriving one. Only `sushi add` uses
+# it, and only ever with a single record — forcing a name for a whole batch would
+# give every stanza the same one.
+build_additions() {
+  local forced="${1:-}"
+  { config_hosts | AWK -F'\t' '{ print tolower($1) }'
+    printf '%s\n' '@@SUSHI_SELECTED@@'
+    cat
+  } | AWK -v sep="$SEP" -v forced="$forced" '
+      # ${host%%.*} for a name, srv-1-2-3-4 for a bare IP, then the same
+      # lowercase-and-replace-the-rest that `tr A-Z a-z | tr -c a-z0-9._- -` did.
+      function sanitize(h,   b) {
+        if (h ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+          b = h; gsub(/\./, "-", b); b = "srv-" b
+        } else {
+          b = h; sub(/\..*/, "", b)
+        }
+        b = tolower(b)
+        gsub(/[^a-z0-9._-]/, "-", b)
+        return b
+      }
+      BEGIN { mode = 0 }
+      $0 == "@@SUSHI_SELECTED@@" { mode = 1; FS = sep; next }
+      mode == 0 { if ($0 != "") taken[$0] = 1; next }
+      {
+        user = $2; host = $3; port = $4; id = $5; jump = $6
+        if (host == "") next
+
+        if (forced != "") {
+          name = forced
+        } else {
+          base = sanitize(host)
+          name = base
+          if (name in taken) name = base (user != "" ? "-" user : "")
+          i = 2
+          while (name in taken) { name = base "-" i; i++ }
+        }
+        taken[name] = 1
+
+        print "Host " name
+        print "    HostName " host
+        if (user != "")
+          print "    User " user
+        else
+          print "    # User ?   (none recorded — ssh will fall back to your local login)"
+        if (port != "" && port != "22") print "    Port " port
+        # Recovered from the command line you actually typed, so a host that needs
+        # a specific key or a bastion imports without hand-editing.
+        if (id != "")   print "    IdentityFile " id
+        if (jump != "") print "    ProxyJump " jump
+        print ""
+      }'
 }
 
 # ------------------------------------------------------------------ config I/O --
 
+# The comment header commit_managed puts at the top of the managed block.
+managed_header() {
+  printf '%s\n' "# Managed by sushi. Hand-edits are kept; delete a stanza to drop it."
+  printf '%s\n' "# Kept at the top of the file: in ssh_config the FIRST value for a"
+  printf '%s\n' "# keyword wins, so a later 'Host *' block can't override these."
+}
+
+# The body between the markers, WITHOUT that header.
+#
+# Dropping it here matters: install_block re-submits this body and commit_managed
+# writes the header again, so a body that still contained one came back with two.
+# Every import stacked another copy — three imports, three headers, forever. Any
+# config that already grew them collapses back to one on the next write.
 managed_block() {
   [ -r "$CONFIG" ] || return 0
-  awk -v b="$BEGIN_MARK" -v e="$END_MARK" \
-    'index($0, b) { f = 1; next } index($0, e) { f = 0; next } f' "$CONFIG"
+  { managed_header
+    printf '%s\n' '@@SUSHI_BODY@@'
+    cat "$CONFIG"
+  } | AWK -v b="$BEGIN_MARK" -v e="$END_MARK" '
+      $0 == "@@SUSHI_BODY@@" { body = 1; next }
+      !body { hdr[$0] = 1; next }
+      index($0, b) { f = 1; next }
+      index($0, e) { f = 0; next }
+      f && !($0 in hdr)'
 }
 
 config_without_managed() {
   [ -r "$CONFIG" ] || return 0
-  awk -v b="$BEGIN_MARK" -v e="$END_MARK" \
+  AWK -v b="$BEGIN_MARK" -v e="$END_MARK" \
     'index($0, b) { f = 1; next } index($0, e) { f = 0; next } !f' "$CONFIG"
 }
 
@@ -380,9 +669,7 @@ commit_managed() {
   tmp="$(mktemp "${TMPDIR:-/tmp}/sushi.XXXXXX")" || die "mktemp failed"
   {
     printf '%s\n' "$BEGIN_MARK"
-    printf '%s\n' "# Managed by sushi. Hand-edits are kept; delete a stanza to drop it."
-    printf '%s\n' "# Kept at the top of the file: in ssh_config the FIRST value for a"
-    printf '%s\n' "# keyword wins, so a later 'Host *' block can't override these."
+    managed_header
     printf '\n'
     cat "$body"
     printf '%s\n' "$END_MARK"
@@ -391,7 +678,7 @@ commit_managed() {
   } > "$tmp"
 
   # collapse runs of blank lines, then validate before committing
-  awk 'NF == 0 { if (blank++) next } NF { blank = 0 } 1' "$tmp" > "$tmp.clean" \
+  AWK 'NF == 0 { if (blank++) next } NF { blank = 0 } 1' "$tmp" > "$tmp.clean" \
     && mv "$tmp.clean" "$tmp"
 
   # Validate with `ssh -G` before committing — but only if the *original* config
@@ -433,7 +720,7 @@ remove_managed_aliases() {
   # Space-separated on ONE line: onetrueawk (macOS) refuses a -v value with a
   # newline in it, and Host patterns cannot contain whitespace anyway.
   flat="$(printf '%s\n' "$names" | tr '\n' ' ')"
-  managed_block | awk -v names="$flat" '
+  managed_block | AWK -v names="$flat" '
     BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") kill[a[i]] = 1 }
     {
       line = $0
@@ -531,7 +818,7 @@ ignore_remove() {
   cp "$IGNORE" "$tmp"
   for pat in "$@"; do
     [ -n "$pat" ] || continue
-    awk -v p="$pat" '
+    AWK -v p="$pat" '
       { line = $0; sub(/#.*/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
       line == p { next }
       { print }' "$tmp" > "$tmp.new" && mv "$tmp.new" "$tmp"
@@ -559,7 +846,7 @@ scan_candidates() {
     scan_history
     printf '%s\n' '@@SUSHI_KNOWN_HOSTS@@'
     scan_known_hosts
-  } | awk '
+  } | AWK '
       function boring(h) {
         return (h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0")
       }
@@ -667,7 +954,7 @@ pend_add() {
 menu_from_cache() {
   [ -n "${SUSHI_SCAN_CACHE:-}" ] && [ -r "$SUSHI_SCAN_CACHE" ] || return 0
   menu_from_candidates < "$SUSHI_SCAN_CACHE" \
-    | awk -F'\t' -v pf="${SUSHI_SCAN_PENDING:-/dev/null}" '
+    | AWK -F'\t' -v pf="${SUSHI_SCAN_PENDING:-/dev/null}" '
         BEGIN { while ((getline l < pf) > 0) if (l != "") gone[l] = 1 }
         !($3 in gone)'
 }
@@ -705,7 +992,8 @@ cmd_scan() {
   if [ "$dry" -eq 1 ] || [ -n "${SUSHI_ALL:-}" ] || ! have fzf || [ ! -t 0 ]; then
     selected="$(printf '%s\n' "$menu" | cut -f2)"
     if [ "$dry" -eq 0 ] && [ -z "${SUSHI_ALL:-}" ]; then
-      have fzf || warn "fzf not found — falling back to importing everything"
+      have fzf || { warn "fzf not found — falling back to importing everything"
+                    warn "    for the pick-what-you-want picker: $(fzf_install_cmd)"; }
       [ -t 0 ] || warn "no terminal for interactive selection — importing everything"
     fi
   else
@@ -739,38 +1027,9 @@ sorted by how often you used them$hidden_note" \
   fi
 
   # ---- build stanzas with collision-free aliases
-  local taken additions name candidate i
-  taken="$(config_hosts | awk -F'\t' '{ print tolower($1) }')"
+  local additions
   additions="$(mktemp "${TMPDIR:-/tmp}/sushi-add.XXXXXX")" || die "mktemp failed"
-  while IFS="$SEP" read -r count user host port identity jump; do
-    [ -n "${host:-}" ] || continue
-    candidate="$(sanitize_alias "$host")"
-    name="$candidate"
-    if printf '%s\n' "$taken" | grep -Fxq "$name"; then
-      name="${candidate}${user:+-$user}"
-    fi
-    i=2
-    while printf '%s\n' "$taken" | grep -Fxq "$name"; do
-      name="$candidate-$i"; i=$((i + 1))
-    done
-    taken="$taken
-$name"
-    {
-      printf 'Host %s\n' "$name"
-      printf '    HostName %s\n' "$host"
-      if [ -n "$user" ]; then
-        printf '    User %s\n' "$user"
-      else
-        printf '    # User ?   (none recorded — ssh will fall back to your local login)\n'
-      fi
-      [ -n "$port" ] && [ "$port" != "22" ] && printf '    Port %s\n' "$port"
-      # Recovered from the command line you actually typed, so a host that needs a
-      # specific key or a bastion imports without hand-editing.
-      [ -n "$identity" ] && printf '    IdentityFile %s\n' "$identity"
-      [ -n "$jump" ] && printf '    ProxyJump %s\n' "$jump"
-      printf '\n'
-    } >> "$additions"
-  done <<< "$selected"
+  printf '%s\n' "$selected" | build_additions > "$additions"
 
   printf '\n--- proposed additions ------------------------------------\n'
   cat "$additions"
@@ -790,6 +1049,108 @@ $name"
     w|W|"") install_block "$additions" ;;
     *) printf 'Cancelled.\n' ;;
   esac
+  rm -f "$additions"
+}
+
+# sushi add — import one host by hand, without waiting for it to show up in your
+# shell history. The gap this fills: a server you have never ssh'd to yet cannot
+# appear as a scan candidate, so before this the only way in was editing the
+# config yourself.
+#
+#   sushi add deploy@web1.example.com
+#   sushi add web1.example.com:2222            the form `sushi list` prints
+#   sushi add box.example.com -i ~/.ssh/work   any ssh flag scan understands
+#   sushi add --as staging deploy@10.20.30.40 -J bastion
+#   sushi add -n deploy@web1.example.com       dry run, writes nothing
+#
+# Everything that is not -n or --as goes to the same parser `scan` runs over your
+# history, so the two agree about what a destination is by construction.
+cmd_add() {
+  local dry=0 forced="" tok
+  local -a args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -n|--dry-run) dry=1; shift ;;
+      --as|-a)      [ "$#" -ge 2 ] || die "--as needs an alias"; forced="$2"; shift 2 ;;
+      --as=*)       forced="${1#--as=}"; shift ;;
+      --help)
+        sed -n '/^# sushi add —/,/^cmd_add/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+        return 0
+        ;;
+      *)            args+=("$1"); shift ;;
+    esac
+  done
+  [ "${#args[@]}" -gt 0 ] || die "add needs a destination, e.g: sushi add deploy@web1.example.com"
+
+  # `sushi list` and the picker both print `user@host:port`, so that is the form
+  # people will paste back in — but ssh's command line has no colon-port syntax,
+  # so rewrite it into the -p the parser expects. Strict shape, no state: a token
+  # with two colons (-L 80:host:80) or a scheme (ssh://) does not match, and an
+  # explicit -p earlier on the line still wins, because the parser takes the
+  # first port it sees before the destination.
+  local -a parsed=()
+  for tok in ${args[@]+"${args[@]}"}; do
+    if [[ "$tok" =~ ^([A-Za-z0-9._-]+@)?([A-Za-z0-9._-]+):([0-9]{1,5})$ ]]; then
+      parsed+=("${BASH_REMATCH[1]}${BASH_REMATCH[2]}" -p "${BASH_REMATCH[3]}")
+    else
+      parsed+=("$tok")
+    fi
+  done
+
+  local rec
+  rec="$(printf 'ssh %s\n' "${parsed[*]}" | extract_stream | sed -n 1p)"
+  [ -n "$rec" ] || die "no destination in: ${args[*]}"
+
+  # only the user and host are needed here — build_additions re-reads the record
+  # for the rest, so there is no second place that has to agree about the fields
+  local user host
+  IFS="$SEP" read -r user host _ <<< "$rec"
+  [ -n "${host:-}" ] || die "no destination in: ${args[*]}"
+
+  # An ignore pattern and an explicit `add` for the same host contradict each
+  # other. The explicit request wins — but say so, or the next `scan` quietly
+  # disagreeing with what just happened looks like a bug.
+  if is_ignored "$user" "$host"; then
+    warn "note: a pattern in $IGNORE matches this host — adding it anyway"
+  fi
+
+  if [ -n "$forced" ]; then
+    case "$forced" in
+      ""|*[!A-Za-z0-9._-]*)
+        die "--as: '$forced' is not a usable Host alias (letters, digits, . _ - only)" ;;
+    esac
+    if config_hosts | AWK -F'\t' -v a="$forced" \
+         'tolower($1) == tolower(a) { hit = 1 } END { exit !hit }'; then
+      die "the alias '$forced' is already in $CONFIG"
+    fi
+  else
+    # Same user@host twice under two names is almost always a mistake rather than
+    # an intention, so it takes an explicit --as to say you meant it.
+    local existing
+    existing="$(config_hosts | AWK -F'\t' -v h="$host" -v u="$user" \
+      'tolower($2) == tolower(h) && tolower($3) == tolower(u) { print $1; exit }')"
+    if [ -n "$existing" ]; then
+      printf '%s is already in %s as "%s".\n' "${user:+$user@}$host" "$CONFIG" "$existing"
+      printf 'Pass --as <alias> to add a second stanza for it anyway.\n'
+      return 0
+    fi
+  fi
+
+  local additions
+  additions="$(mktemp "${TMPDIR:-/tmp}/sushi-add.XXXXXX")" || die "mktemp failed"
+  # build_additions wants a count field it does not use for a single record
+  printf '1%s%s\n' "$SEP" "$rec" | build_additions "$forced" > "$additions"
+
+  printf '\n--- proposed addition -------------------------------------\n'
+  cat "$additions"
+  printf -- '-----------------------------------------------------------\n'
+
+  if [ "$dry" -eq 1 ]; then
+    printf '(dry run — nothing written)\n'
+    rm -f "$additions"
+    return 0
+  fi
+  install_block "$additions"
   rm -f "$additions"
 }
 
@@ -820,9 +1181,9 @@ ignore_rows() {
   {
     config_hosts
     printf '%s\n' '@@SUSHI_ALIASES@@'
-    managed_block | awk '{ l = $0; sub(/^[ \t]+/, "", l)
+    managed_block | AWK '{ l = $0; sub(/^[ \t]+/, "", l)
       if (tolower(l) ~ /^host[ \t]/) { for (i = 2; i <= NF; i++) print $i } }'
-  } | awk -v pink="$C_PINK" -v rice="$C_RICE" -v off="$C_OFF" '
+  } | AWK -v pink="$C_PINK" -v rice="$C_RICE" -v off="$C_OFF" '
       BEGIN { FS = "\t"; mode = 0 }
       $0 == "@@SUSHI_ALIASES@@" { mode = 1; next }
       mode == 0 {
@@ -835,6 +1196,44 @@ ignore_rows() {
           pink, "imported", off, rice, $0 "  (" tgt[$0] ")", off, $0
       }
     '
+}
+
+# Turn the ignore picker's selected rows (on stdin) into a tagged instruction
+# stream: "P<TAB>pattern" to add to the ignore list, "D<TAB>alias" to delete from
+# the managed block. An `imported` row yields both.
+#
+# config_hosts runs ONCE here, not once per selected row. The `imported` branch
+# used to call it inside the caller's read loop, so dismissing 40 imported hosts
+# meant 40 full config parses — the same mistake ignore_rows was already fixed
+# for, living a second time downstream of it. One awk over both streams,
+# marker-separated, the shape used everywhere else in this file.
+ignore_split_selection() {
+  local sel
+  sel="$(cat)"
+  { config_hosts
+    printf '%s\n' '@@SUSHI_SELECTION@@'
+    printf '%s\n' "$sel"
+  } | AWK -v esc="$ESC" '
+      BEGIN { FS = "\t"; mode = 0 }
+      $0 == "@@SUSHI_SELECTION@@" { mode = 1; next }
+      mode == 0 { if ($1 != "") tgt[$1] = ($3 != "" ? $3 "@" : "") $2; next }
+      {
+        line = $0
+        # fzf --ansi hands the line back with the colours already stripped; strip
+        # again anyway, because a row whose "imported" tag fails to match gets
+        # added to the ignore list WITHOUT its stanza being deleted — a silent
+        # wrong answer rather than a visible error.
+        gsub(esc "\\[[0-9;]*m", "", line)
+        if (line == "") next
+        kind = line; sub(/ .*/, "", kind)
+        rest = line; sub(/^.* /, "", rest)
+        if (kind == "imported") {
+          print "D\t" rest
+          if (rest in tgt) print "P\t" tgt[rest]
+        } else {
+          print "P\t" rest
+        }
+      }'
 }
 
 # sushi ignore / sushi delete
@@ -875,6 +1274,7 @@ cmd_ignore() {
           --bind 'ctrl-a:select-all')"
         [ -n "$sel" ] || { printf 'Nothing selected.\n'; return 0; }
       else
+        have fzf || warn "fzf not found — install it: $(fzf_install_cmd)"
         warn "no fzf/terminal — pass patterns as arguments instead"
         return 1
       fi
@@ -921,25 +1321,21 @@ EOF
       --bind 'ctrl-a:select-all')"
     [ -n "$sel" ] || { printf 'Nothing selected.\n'; return 0; }
   else
+    have fzf || warn "fzf not found — install it: $(fzf_install_cmd)"
     warn "no fzf/terminal — pass patterns as arguments: sushi ignore 'root@*'"
     return 1
   fi
 
   # ---- split the selection into patterns to ignore and aliases to delete
   local -a pats=() dels=()
-  local kind rest
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    kind="${line%% *}"
-    rest="${line##* }"
-    case "$kind" in
-      imported) dels+=("$rest"); pats+=("$(config_hosts | awk -F'\t' -v a="$rest" \
-                  '$1 == a { printf "%s%s", ($3 != "" ? $3 "@" : ""), $2 }')") ;;
-      *)        pats+=("$rest") ;;
+  local tag val
+  while IFS="$TAB" read -r tag val; do
+    [ -n "$val" ] || continue
+    case "$tag" in
+      D) dels+=("$val") ;;
+      P) pats+=("$val") ;;
     esac
-  done <<EOF
-$sel
-EOF
+  done < <(printf '%s\n' "$sel" | ignore_split_selection)
 
   printf '\n'
   [ "${#dels[@]}" -gt 0 ] && printf 'Deleting from the managed block: %s\n' "${dels[*]}"
@@ -962,7 +1358,7 @@ cmd_list() {
   if [ -t 1 ]; then h="$C_VIOLET"; a="$C_RICE"; t="$C_DIM"; z="$C_OFF"
   else h=""; a=""; t=""; z=""; fi
   printf '%s\n' "$rows" | sort -f \
-    | awk -F'\t' -v h="$h" -v a="$a" -v t="$t" -v z="$z" '
+    | AWK -F'\t' -v h="$h" -v a="$a" -v t="$t" -v z="$z" '
         BEGIN { printf "%s%-22s %s%s\n", h, "ALIAS", "TARGET", z }
         {
           tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
@@ -975,7 +1371,7 @@ cmd_preview() {
   local a="${1:-}" line key val
   [ -n "$a" ] || return 0
 
-  config_hosts | awk -F'\t' -v a="$a" -v c="$C_ROSE" -v z="$C_OFF" '$1 == a {
+  config_hosts | AWK -F'\t' -v a="$a" -v c="$C_ROSE" -v z="$C_OFF" '$1 == a {
     printf "  %s%s%s%s%s\n", c, ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : ""), z
   }'
 
@@ -1002,7 +1398,7 @@ cmd_preview() {
   # shellcheck disable=SC2088  # a literal ~ is what we want to display
   case "$disp" in "$HOME"/*) disp="~/${disp#"$HOME"/}" ;; esac
   printf '\n  %sstanza in %s%s\n' "$C_VIOLET" "$disp" "$C_OFF"
-  flatten_config "$CONFIG" 2>/dev/null | awk -v a="$a" -v d="$C_DIM" -v z="$C_OFF" '
+  flatten_config "$CONFIG" 2>/dev/null | AWK -v a="$a" -v d="$C_DIM" -v z="$C_OFF" '
     { k = tolower($1) }
     k == "host" { inb = 0; for (i = 2; i <= NF; i++) if ($i == a) inb = 1; if (inb) { print "    " d $0 z }; next }
     k == "match" { inb = 0; next }
@@ -1029,7 +1425,7 @@ scan_history_cached() {
     scan_history
     return 0
   fi
-  sig="${#files[@]}:$(wc -c -- "${files[@]}" 2>/dev/null | tail -1 | awk '{ print $1 }')"
+  sig="${#files[@]}:$(wc -c -- "${files[@]}" 2>/dev/null | tail -1 | AWK '{ print $1 }')"
 
   if [ -r "$f" ] && IFS= read -r line < "$f" && [ "$line" = "#sig $sig" ]; then
     tail -n +2 "$f"
@@ -1038,9 +1434,21 @@ scan_history_cached() {
 
   local out
   out="$(scan_history)"
+  # This file is derived from ~/.ssh/config and your shell history: it lists
+  # every user@host:port you have ever reached. Both sources are 0600, so the
+  # cache is too — a default umask would leave it 0644 and hand your whole
+  # server inventory to every account on the box.
+  #
+  # `umask` in a subshell rather than a chmod after the fact: a chmod leaves the
+  # file world-readable for the window between creation and the fix, and the
+  # write is where the contents land.
   if mkdir -p "$dir" 2>/dev/null; then
-    { printf '#sig %s\n' "$sig"; printf '%s\n' "$out"; } > "$f.tmp" 2>/dev/null \
-      && mv "$f.tmp" "$f" 2>/dev/null
+    chmod 700 "$dir" 2>/dev/null
+    if ( umask 077
+         { printf '#sig %s\n' "$sig"; printf '%s\n' "$out"; } > "$f.tmp" ) 2>/dev/null
+    then
+      mv "$f.tmp" "$f" 2>/dev/null   # mv keeps the mode the umask gave it
+    fi
   fi
   printf '%s\n' "$out"
 }
@@ -1056,7 +1464,7 @@ scan_history_cached() {
 # alias itself, which catches `ssh staging` where the alias IS what you typed.
 picker_lines() {
   if [ "${SUSHI_SORT:-usage}" = alpha ]; then
-    config_hosts | sort -f | awk -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
+    config_hosts | sort -f | AWK -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
       {
         tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
         printf "%s%-22s%s %s%s%s\t%s\n", a, $1, z, t, tgt, z, $1
@@ -1070,7 +1478,7 @@ picker_lines() {
     scan_history_cached
     printf '%s\n' '@@SUSHI_CONFIG@@'
     config_hosts
-  } | awk -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
+  } | AWK -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
       BEGIN { FS = "|"; mode = 0 }
       $0 == "@@SUSHI_CONFIG@@" { mode = 1; FS = "\t"; next }
       mode == 0 {
@@ -1107,7 +1515,7 @@ run_picker() {
     warn "no hosts in $CONFIG yet — run: sushi scan"
     return 1
   fi
-  have fzf || { warn "fzf not found. Install it (brew install fzf) or use: sushi list"; return 1; }
+  have fzf || { warn_no_fzf; return 1; }
 
   out="$(printf '%s\n' "$lines" \
     | FZF --ansi --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
@@ -1138,12 +1546,31 @@ cmd_pick() {
 }
 
 usage() {
-  sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
+  # The header block, however long it grows — a hardcoded line range goes stale
+  # the first time someone documents a new subcommand.
+  AWK 'NR >= 3 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
+}
+
+cmd_version() {
+  local rev="" dir
+  dir="$(dirname "$SELF")"
+  # sushi is installed by `git clone` and updated by `git pull`, with nothing
+  # copied anywhere — so in the normal case the commit is a more precise answer
+  # than a hand-bumped number, and worth printing alongside it.
+  if have git && [ -d "$dir/.git" ]; then
+    rev="$(git -C "$dir" describe --always --dirty --tags 2>/dev/null)"
+  fi
+  if [ -n "$rev" ]; then
+    printf 'sushi %s (%s)\n' "$VERSION" "$rev"
+  else
+    printf 'sushi %s\n' "$VERSION"
+  fi
 }
 
 case "${1:-}" in
   ""|-\?)            cmd_pick "" ;;
   scan)              shift; cmd_scan "$@" ;;
+  add)               shift; cmd_add "$@" ;;
   ignore|delete|rm)  shift; cmd_ignore "$@" ;;
   list|ls)           cmd_list ;;
   choose)            run_picker "${2:-}" ;;      # print an alias, don't connect
@@ -1153,13 +1580,18 @@ $a"; done
                      remove_managed_aliases "$names" ;;
   __preview)         cmd_preview "${2:-}" ;;     # internal: fzf preview pane
   __lines)           picker_lines ;;             # internal: what fzf is fed
+  __aliases)         config_hosts | AWK -F'\t' '{ print $1 }' | sort -f ;;  # for completion
+  __fzfhint)         fzf_install_cmd; printf '\n' ;;   # internal: install.sh reuses this
   __subcommands)     printf '%s\n' "$SUBCOMMANDS" | tr ' ' '\n' ;;
   __scanmenu)        scan_menu ;;                # internal: scan picker's fzf input
   __ignoremenu)      ignore_rows ;;             # internal: ignore picker's fzf input
+  __ignoresplit)     ignore_split_selection ;;  # internal: selection -> P/D stream
   __menucache)       menu_from_cache ;;          # internal: reload from the cache
   __pend)            shift; pend_add "$@" ;;     # internal: note a ctrl-x dismissal
   __candidates)      scan_history ;;             # internal: raw history scan
+  __extract)         extract_stream ;;          # internal: history lines -> records
   edit)              exec "${EDITOR:-vi}" "$CONFIG" ;;
   help|-h|--help)    usage ;;
+  version|--version|-V) cmd_version ;;
   *)                 cmd_pick "$1" ;;
 esac

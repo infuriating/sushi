@@ -73,6 +73,30 @@ run() {
   HOME="$h" "$SUSHI" "$@" 2>&1
 }
 
+# Run sushi with a fake home under a deadline, echoing its output; returns 124 if
+# it had to be killed. macOS has no `timeout`, and the failure this guards
+# against — argument parsing that never advances — hangs rather than fails, which
+# in CI costs a whole runner instead of one red assertion.
+run_bounded() {
+  local h="$1" secs="$2"; shift 2
+  local out="$WORK/bounded.$$" pid rc i=0 lim
+  lim=$((secs * 10))
+  ( HOME="$h" "$SUSHI" "$@" >"$out" 2>&1 ) &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "$lim" ]; do
+    sleep 0.1; i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -f "$out"
+    return 124
+  fi
+  wait "$pid"; rc=$?
+  cat "$out"; rm -f "$out"
+  return "$rc"
+}
+
 # import everything sushi finds, non-interactively
 import_all() {
   local h="$1"
@@ -230,6 +254,142 @@ printf ': 1:0;ssh globber@globs.example.com *.log\n' > "$H/.zsh_history"
 cand="$(cd "$H" && HOME="$H" "$SUSHI" __candidates 2>&1)"
 assert_has   "an unquoted glob in history does not expand" "1|globber|globs.example.com|" "$cand"
 assert_lacks "no filenames leak in from the cwd"           "aaa.log"                      "$cand"
+
+# --------------------------------------------------------------------------
+section "history parsing: the awk extractor matches the bash one"
+
+# extract_stream_awk is a transcription of extract_dest, and the only thing that
+# makes rewriting the most load-bearing function in the tool safe is proving the
+# two agree. Build a corpus of every shape that has ever mattered plus the
+# combinatorial neighbourhood around it, and require byte-identical output.
+#
+# SUSHI_EXTRACT=bash selects the reference implementation.
+CORPUS="$WORK/corpus"
+{
+  cat <<'EOF'
+ssh deploy@web1.example.com
+ssh -p 2022 deploy@staging.example.com
+ssh other@late-flag.example.com -p 8022
+ssh -i ~/.ssh/id_ed25519 keyed@keys.example.com
+ssh -o StrictHostKeyChecking=no opt@opts.example.com
+ssh -J jumper@bastion.example.com deep@behind.example.com
+ssh -l flaguser flag-l.example.com
+ssh "quoted@quotes.example.com"
+ssh 'singlequoted@sq.example.com'
+cd /tmp && ssh chained@chain.example.com
+foo; ssh semi@semi.example.com
+foo | ssh pipe@pipe.example.com
+sudo ssh sudoer@sudo.example.com
+command time nohup ssh stacked@stack.example.com
+/usr/bin/ssh abs@abs.example.com
+./ssh rel@rel.example.com
+ssh ssh://u@url.example.com:2200/
+ssh ssh://url2.example.com/
+ssh trailing.example.com:
+ssh u@v@double.example.com
+ssh -p2222 attached@att.example.com
+ssh -lbob attachedl.example.com
+ssh -i~/k attachedi.example.com
+ssh -Jj@b attachedj.example.com
+ssh -p 999999 badport.example.com
+ssh -p abc alsobad.example.com
+ssh -i 'quoted path' quotedkey.example.com
+ssh -J 'x;y' badjump.example.com
+ssh -tt cmd.example.com 'sudo -i'
+ssh -F /dev/null dashf.example.com
+ssh -W -b -O -Q noargs.example.com
+ssh -- dashdash.example.com
+ssh -weird
+ssh .dotted.example.com
+ssh under_score.example.com
+ssh 1.2.3.4
+ssh UPPER.Example.COM
+ssh -6 user@[2001:db8::1]
+ssh user@2001:db8::1
+ssh *.glob.example.com
+ssh host?
+ssh $VAR
+ssh a(b)
+ssh trailing-
+ssh -
+ssh h
+ssh
+sudo
+sudo ssh
+ssh -p
+ssh-keygen -t ed25519
+ssh-add -l
+sshfs host:/mnt /mnt
+scp file.txt user@scp.example.com:/tmp/
+rsync -av ./d user@rsync.example.com:/srv/
+echo "ssh is a great tool"
+# ssh commented@out.example.com
+: 1699999999:0;ssh ts@stamped.example.com
+- cmd: ssh fish@fish.example.com
+:no-semicolon ssh nosemi.example.com
+   ssh    padded@pad.example.com
+EOF
+  # the combinatorial neighbourhood: prefixes x flags x destination shapes
+  for pre in '' 'sudo ' 'time ' 'nohup ' '/usr/bin/'; do
+    for flag in '' '-v ' '-p 22 ' '-p2222 ' '-l bob ' '-i ~/k ' '-J j@b ' '-o X=y ' '-4 ' '-W ' '- '; do
+      for dest in 'h.example.com' 'u@h.example.com' 'u@v@h.example.com' '"q@h.example.com"' \
+                  'ssh://u@h.example.com:2200/' 'h.example.com:' '-weird' '.dot.com' '1.2.3.4' ''; do
+        for post in '' ' ls -la' ' -p 2022' ' -l alice' ' -i ~/k2' ' -J q@r' " 'sudo -i'" ' -W'; do
+          printf '%sssh %s%s%s\n' "$pre" "$flag" "$dest" "$post"
+        done
+      done
+    done
+  done
+} > "$CORPUS"
+
+n_corpus="$(wc -l < "$CORPUS" | tr -d ' ')"
+"$SUSHI" __extract < "$CORPUS" > "$WORK/ex.awk.out" 2>"$WORK/ex.awk.err"
+SUSHI_EXTRACT=bash "$SUSHI" __extract < "$CORPUS" > "$WORK/ex.bash.out" 2>"$WORK/ex.bash.err"
+assert_eq "the awk extractor is byte-identical to the bash one over $n_corpus lines" \
+          "$(cat "$WORK/ex.bash.out")" "$(cat "$WORK/ex.awk.out")"
+assert_eq "and says nothing on stderr" "" "$(cat "$WORK/ex.awk.err")"
+# a corpus that parsed nothing would make the comparison above vacuous
+n_rec="$(wc -l < "$WORK/ex.awk.out" | tr -d ' ')"
+if [ "$n_rec" -gt 200 ]; then ok "the corpus actually exercises the parser ($n_rec records)"
+else no "the corpus actually exercises the parser (only $n_rec records)"; fi
+
+# --------------------------------------------------------------------------
+section "history parsing: bytes that are not valid UTF-8"
+
+# onetrueawk — macOS's /usr/bin/awk — aborts the ENTIRE program on the first
+# input byte sequence that is not valid encoding in the current locale:
+#
+#     awk: towc: multibyte conversion failure on: '...'
+#
+# It does it mid-stream, so hosts after the offending line vanish silently. A
+# shell history reliably contains such bytes (a truncated paste is enough), and
+# this cost a real user every host below the bad line. Every awk in sushi runs
+# under LC_ALL=C now; this is the test that keeps it that way.
+H="$(newhome badbytes)"
+{
+  printf ': 1:0;ssh first@one.example.com\n'
+  printf ': 2:0;echo ssh \xe2\x80 truncated multibyte paste\n'
+  printf ': 3:0;ssh second@two.example.com\n'
+  printf ': 4:0;ssh third\xff\xfe@three.example.com\n'
+  printf ': 5:0;ssh fourth@four.example.com\n'
+} > "$H/.zsh_history"
+
+for loc in C en_US.UTF-8; do
+  out="$(HOME="$H" LANG="$loc" LC_ALL="$loc" "$SUSHI" __candidates 2>"$WORK/bb.err")"
+  assert_has   "[$loc] a host before the bad bytes survives" "one.example.com"  "$out"
+  assert_has   "[$loc] and one between two bad lines"        "two.example.com"  "$out"
+  assert_has   "[$loc] and one after them"                  "four.example.com" "$out"
+  assert_eq    "[$loc] with nothing on stderr" "" "$(cat "$WORK/bb.err")"
+done
+
+# the whole pipeline, not just the extractor
+out="$(HOME="$H" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 "$SUSHI" scan -n 2>&1)"
+assert_has   "scan still proposes hosts past the bad bytes" "four.example.com" "$out"
+assert_lacks "and never mentions a conversion failure"      "towc"             "$out"
+
+# a UTF-8 hostname is not a crash either — it is just not a valid host
+out="$(HOME="$H" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 "$SUSHI" list 2>&1)"
+assert_lacks "list is clean too" "towc" "$out"
 
 # --------------------------------------------------------------------------
 section "known_hosts"
@@ -755,6 +915,41 @@ EOF
   n="$(oldawk "$H" __lines | wc -l | tr -d ' ')"
   assert_eq "the picker lists the three survivors" "3" "$n"
   assert_has "the preview renders" "ab.example.com" "$(oldawk "$H" __preview beta)"
+
+  # Everything below moved into awk after the section above was written, so it is
+  # newly exposed to onetrueawk's quirks: no {n,m} intervals, byte-oriented
+  # regexes, and an abort on invalid multibyte input.
+  out="$(oldawk "$H" add -n deploy@otawk.example.com -p 2222 -i /tmp/k -J bastion)"
+  assert_has "add builds a stanza"     "Host otawk"          "$out"
+  assert_has "with the port"           "Port 2222"           "$out"
+  assert_has "the key"                 "IdentityFile /tmp/k" "$out"
+  assert_has "and the jump host"       "ProxyJump bastion"   "$out"
+  out="$(oldawk "$H" add -n 10.0.0.7)"
+  assert_has "and an IP still gets the srv- alias" "Host srv-10-0-0-7" "$out"
+
+  # the port check is ^[0-9]{1,5}$ written without an interval expression
+  out="$(printf 'ssh -p 999999 sixdigits.example.com
+ssh -p 65000 fivedigits.example.com
+'          | PATH="$SHIM:$PATH" HOME="$H" "$SUSHI" __extract)"
+  assert_has "a six-digit port is dropped"  "|sixdigits.example.com||"  "$out"
+  assert_has "a five-digit one is kept"     "|fivedigits.example.com|65000|" "$out"
+
+  # the two extractors must still agree under onetrueawk
+  ex_awk="$(PATH="$SHIM:$PATH" HOME="$H" "$SUSHI" __extract < "$CORPUS")"
+  ex_bash="$(PATH="$SHIM:$PATH" HOME="$H" SUSHI_EXTRACT=bash "$SUSHI" __extract < "$CORPUS")"
+  assert_eq "the extractors agree under onetrueawk too" "$ex_bash" "$ex_awk"
+
+  # and invalid multibyte input must not abort the run
+  BH="$(newhome otawkbytes)"
+  { printf ': 1:0;ssh first@one.example.com
+'
+    printf ': 2:0;echo ssh \xff\xfe bad bytes
+'
+    printf ': 3:0;ssh second@two.example.com
+'; } > "$BH/.zsh_history"
+  out="$(PATH="$SHIM:$PATH" HOME="$BH" LC_ALL=en_US.UTF-8 "$SUSHI" __candidates 2>&1)"
+  assert_has   "onetrueawk survives invalid multibyte input" "two.example.com" "$out"
+  assert_lacks "with no conversion failure"                  "towc"            "$out"
 else
   skip "onetrueawk portability" "original-awk not installed"
 fi
@@ -858,6 +1053,206 @@ out="$(run "$H" ignore)"
 assert_has "reports having nothing left to offer" "Nothing to ignore" "$out"
 assert_has "and points at the ignore list"        "already dismissed" "$out"
 
+
+# --------------------------------------------------------------------------
+section "the history cache"
+
+# The picker memoises the history scan so `ssh` stays instant. The file is
+# derived from the same data as ~/.ssh/config — every user@host:port you have
+# ever reached — and used to be written with the default umask, i.e. 0644 in a
+# 0755 directory, handing your server inventory to every account on the box.
+H="$(newhome cache)"
+printf ': 1:0;ssh cached@c1.example.com\n: 2:0;ssh cached@c2.example.com\n' > "$H/.zsh_history"
+printf 'Host c1\n    HostName c1.example.com\n    User cached\n' > "$H/.ssh/config"
+CDIR="$H/.cache/sushi"
+HOME="$H" SUSHI_CACHE_DIR="$CDIR" "$SUSHI" __lines >/dev/null 2>&1
+
+if [ -f "$CDIR/history" ]; then
+  ok "the picker writes a cache"
+  assert_eq "the cache file is 0600"      "-rw-------"  "$(ls -l "$CDIR/history" | cut -c1-10)"
+  assert_eq "the cache directory is 0700" "drwx------"  "$(ls -ld "$CDIR" | cut -c1-10)"
+else
+  no "the picker writes a cache"
+fi
+
+# a warm read must return what the cold one did, minus the signature line
+cold="$(HOME="$H" SUSHI_CACHE_DIR="$WORK/nocache-$$" "$SUSHI" __lines 2>/dev/null)"
+warm="$(HOME="$H" SUSHI_CACHE_DIR="$CDIR" "$SUSHI" __lines 2>/dev/null)"
+assert_eq "a cache hit produces the same picker rows" "$cold" "$warm"
+assert_lacks "and never leaks the signature line into them" "#sig" "$warm"
+
+# appending to the history changes its byte size, which is the signature
+printf ': 3:0;ssh cached@c3.example.com\n' >> "$H/.zsh_history"
+HOME="$H" SUSHI_CACHE_DIR="$CDIR" "$SUSHI" __lines >/dev/null 2>&1
+assert_has "new history invalidates the cache" "c3.example.com" \
+           "$(cat "$CDIR/history")"
+
+# --------------------------------------------------------------------------
+section "the managed block header is written once"
+
+# managed_block used to hand the header comments back to commit_managed, which
+# wrote its own on top — so every import stacked another copy, forever.
+H="$(newhome hdr)"
+for host in one two three; do
+  printf ': 1:0;ssh x@%s.example.com\n' "$host" >> "$H/.zsh_history"
+  import_all "$H" >/dev/null
+done
+n="$(grep -c 'Managed by sushi' "$H/.ssh/config")"
+assert_eq "three imports leave one header" "1" "$n"
+out="$(run "$H" list)"
+for host in one two three; do
+  assert_has "and every host survived: $host" "$host" "$out"
+done
+
+# a config that already grew duplicates collapses on the next write
+H="$(newhome hdr2)"
+{
+  printf '%s\n' "# >>> sushi managed hosts >>>"
+  printf '%s\n' "# Managed by sushi. Hand-edits are kept; delete a stanza to drop it."
+  printf '%s\n' "# Managed by sushi. Hand-edits are kept; delete a stanza to drop it."
+  printf '%s\n' "# Managed by sushi. Hand-edits are kept; delete a stanza to drop it."
+  printf 'Host old\n    HostName old.example.com\n'
+  printf '%s\n' "# <<< sushi managed hosts <<<"
+} > "$H/.ssh/config"
+printf ': 1:0;ssh new@fresh.example.com\n' > "$H/.zsh_history"
+import_all "$H" >/dev/null
+assert_eq "an already-duplicated header collapses to one" "1" \
+          "$(grep -c 'Managed by sushi' "$H/.ssh/config")"
+assert_has "without losing the existing stanza" "old" "$(run "$H" list)"
+
+# --------------------------------------------------------------------------
+section "ignore picker: splitting the selection"
+
+# The `imported` branch used to call config_hosts once per selected row, so
+# dismissing 40 hosts meant 40 full config parses (the same mistake ignore_rows
+# had already been fixed for). One pass now, and this asserts the mapping it
+# produces: P = pattern to ignore, D = alias to delete.
+H="$(newhome ignsplit)"
+cat > "$H/.ssh/config" <<'EOF'
+# >>> sushi managed hosts >>>
+Host alpha
+    HostName a.example.com
+    User one
+Host beta
+    HostName b.example.com
+# <<< sushi managed hosts <<<
+EOF
+out="$(printf 'imported  alpha  (one@a.example.com)   alpha\n' | run "$H" __ignoresplit)"
+assert_has "an imported row yields the alias to delete"  "D	alpha"             "$out"
+assert_has "and the target to start ignoring"            "P	one@a.example.com" "$out"
+out="$(printf 'scan      new@fresh.example.com   new@fresh.example.com\n' | run "$H" __ignoresplit)"
+assert_has   "a scan row yields only a pattern" "P	new@fresh.example.com" "$out"
+assert_lacks "and nothing to delete"            "D	"                      "$out"
+# a managed host with no User must not produce a stray "@"
+out="$(printf 'imported  beta  (b.example.com)   beta\n' | run "$H" __ignoresplit)"
+assert_has   "a userless host ignores the bare hostname" "P	b.example.com" "$out"
+assert_lacks "with no empty username glued on"           "P	@"             "$out"
+# the real rows carry colour; the tag must still be recognised
+out="$(run "$H" __ignoremenu | run "$H" __ignoresplit)"
+assert_has "coloured rows straight from the picker still split" "D	alpha" "$out"
+
+# --------------------------------------------------------------------------
+section "sushi add"
+
+H="$(newhome add)"
+out="$(run "$H" add deploy@web1.example.com)"
+assert_has "adds a host that was never in the history" "Host web1" "$out"
+assert_has "with the user it was given"                "User deploy" "$out"
+assert_has "and it lands in the config"                "web1" "$(run "$H" list)"
+assert_eq  "and the config is still 0600" "-rw-------" "$(ls -l "$H/.ssh/config" | cut -c1-10)"
+
+# the form sushi itself prints, pasted straight back in
+out="$(run "$H" add -n 'web2.example.com:2222')"
+assert_has "accepts the user@host:port form it prints" "HostName web2.example.com" "$out"
+assert_has "turning the colon into a Port"             "Port 2222"                 "$out"
+assert_lacks "and writes nothing on -n"                "Updated"                   "$out"
+assert_lacks "so the host is not in the config"        "web2"                      "$(run "$H" list)"
+
+# any flag the history parser understands
+out="$(run "$H" add -n keyed.example.com -i /tmp/k -J bastion -p 2200 -l bob)"
+assert_has "passes -i through" "IdentityFile /tmp/k" "$out"
+assert_has "passes -J through" "ProxyJump bastion"   "$out"
+assert_has "passes -p through" "Port 2200"           "$out"
+assert_has "passes -l through" "User bob"            "$out"
+
+# --as names the stanza
+out="$(run "$H" add --as staging deploy@10.20.30.40)"
+assert_has "--as sets the alias"       "Host staging" "$out"
+assert_has "and it is what gets used"  "staging"      "$(run "$H" list)"
+out="$(run "$H" add --as=inline other.example.com)"
+assert_has "--as=NAME works too" "Host inline" "$out"
+
+# an IP with no --as still gets the readable alias scan would have given it
+out="$(run "$H" add -n 192.168.1.254)"
+assert_has "an IP gets the srv- alias" "Host srv-192-168-1-254" "$out"
+
+# refusing the obvious mistakes
+out="$(run "$H" add deploy@web1.example.com)"
+assert_has "a second add of the same target is refused" "already in" "$out"
+assert_has "naming the alias that covers it"            "web1"       "$out"
+n="$(printf '%s\n' "$(run "$H" list)" | grep -c 'web1.example.com')"
+assert_eq  "and nothing is written twice" "1" "$n"
+out="$(run "$H" add --as web1again deploy@web1.example.com)"
+assert_has "but --as says you meant it" "Host web1again" "$out"
+
+if run "$H" add --as 'not an alias' x.example.com >/dev/null 2>&1; then
+  no "an unusable --as name is refused"
+else
+  ok "an unusable --as name is refused"
+fi
+if run "$H" add --as staging y.example.com >/dev/null 2>&1; then
+  no "an --as name already in the config is refused"
+else
+  ok "an --as name already in the config is refused"
+fi
+if run "$H" add >/dev/null 2>&1; then
+  no "add with no destination is refused"
+else
+  ok "add with no destination is refused"
+fi
+if run "$H" add -n -- >/dev/null 2>&1; then
+  no "add with nothing that parses is refused"
+else
+  ok "add with nothing that parses is refused"
+fi
+# --as with no name must not spin: `shift 2` with one argument left does not
+# shift, and a loop that does not advance never ends
+run_bounded "$H" 5 add --as >/dev/null 2>&1; rc=$?
+case "$rc" in
+  0)   no "add --as with no name is refused" ;;
+  124) no "add --as with no name is refused (it hung instead)" ;;
+  *)   ok "add --as with no name is refused" ;;
+esac
+
+# an ignore pattern and an explicit add contradict each other: the add wins,
+# but it has to say so
+run "$H" ignore 'root@*' >/dev/null
+out="$(run "$H" add -n root@rooted.example.com)"
+assert_has "add notes an ignore pattern that matches" "matches this host" "$out"
+assert_has "and adds it anyway"                       "Host rooted"       "$out"
+
+# the written config must still parse
+if command -v ssh >/dev/null 2>&1; then
+  if ssh -F "$H/.ssh/config" -G probe.invalid >/dev/null 2>&1; then
+    ok "everything add wrote parses under ssh -G"
+  else
+    no "everything add wrote parses under ssh -G"
+  fi
+fi
+
+# --------------------------------------------------------------------------
+section "sushi --version"
+
+out="$(run "$H" --version)"
+assert_has "reports a version"            "sushi 0" "$out"
+assert_eq  "on one line"                  "1"       "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+assert_eq  "and version is the same"      "$out"    "$(run "$H" version)"
+# usage() reads its own header, so it must not be pinned to a line range
+out="$(run "$H" help)"
+assert_has "usage lists add"        "sushi add"     "$out"
+assert_has "usage lists --version"  "sushi --version" "$out"
+assert_has "usage still lists scan" "sushi scan"    "$out"
+assert_lacks "and stops at the code" "set -uo"      "$out"
 
 # --------------------------------------------------------------------------
 section "theme"
@@ -989,6 +1384,41 @@ if command -v zsh >/dev/null 2>&1; then
   assert_has "a bare unknown word is still a picker query" "no hosts in" "$out"
   assert_has "the dispatcher exists even in off mode" "0" "$(zprobe off 'print $SUSHI_EXEC')"
 
+  section "zsh integration: completion"
+
+  # `_sushi` is defined inline and registered with compdef rather than shipped as
+  # a file in fpath, because install.sh appends its source line to the END of
+  # ~/.zshrc — after compinit has already run, at which point a new fpath entry
+  # is never scanned. These assertions are what keep that decision honest.
+  ZCD="$WORK/zcompdump"
+  # zcprobe <mode> <snippet> -> last line, with the completion system loaded
+  zcprobe() {
+    HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0
+      autoload -Uz compinit; compinit -u -d '$ZCD' 2>/dev/null
+      SUSHI_MODE='$1'; source '$Z'; $2" 2>&1 | tail -1
+  }
+
+  assert_eq "compdef registers _sushi for sushi" "_sushi" "$(zcprobe key 'print $_comps[sushi]')"
+  assert_eq "and the function exists"            "1"      "$(zcprobe key 'print ${+functions[_sushi]}')"
+  assert_eq "so does the host helper"            "1"      "$(zcprobe key 'print ${+functions[_sushi_aliases]}')"
+
+  # off mode means "no key bindings, do not touch ssh" — not "a worse `sushi`"
+  assert_eq "off mode still gets completion" "_sushi" "$(zcprobe off 'print $_comps[sushi]')"
+
+  # ssh keeps zsh's own completion: sushi writes real Host stanzas, so _ssh
+  # already knows every imported alias. Overriding it would be a regression.
+  out="$(zcprobe key 'print $_comps[ssh]')"
+  assert_lacks "ssh completion is left to zsh" "_sushi" "$out"
+
+  # without compinit there is no compdef, and loading must stay silent
+  out="$(HOME="$H" SHELL_SESSIONS_DISABLE=1 zsh -ic "SAVEHIST=0
+    unfunction compdef 2>/dev/null
+    source '$Z' && print LOADED" 2>&1 | tail -1)"
+  assert_eq "no compinit is not an error" "LOADED" "$out"
+
+  # the completion reads aliases from the engine, so that has to work
+  assert_has "the engine lists aliases for completion" "zhost" "$(run "$H" __aliases)"
+
   section "zsh integration: mode key"
   assert_eq "leaves ssh a real command"  "ssh: command"       "$(zprobe key 'whence -w ssh')"
   assert_has "binds the key"             "sushi-insert-host"  "$(zprobe key "bindkey '^S'")"
@@ -1112,6 +1542,43 @@ out="$(HOME="$IH" SHELL=/bin/zsh TERM_PROGRAM=WarpTerminal "$ROOT/install.sh" --
 assert_has "warns that wrap breaks Warp's completion" "shadows the ssh" "$out"
 out="$(HOME="$IH" SHELL=/bin/zsh TERM_PROGRAM=WarpTerminal "$ROOT/install.sh" --mode=enter 2>&1)"
 assert_lacks "stays quiet about Warp in enter mode" "shadows the ssh" "$out"
+
+# A missing fzf must produce advice that is right for THIS machine, and must
+# never block a non-interactive run (CI pipes install.sh its stdin from nowhere).
+FAKEBIN="$WORK/fakebin"
+mkdir -p "$FAKEBIN"
+for pm in apt-get dnf pacman zypper apk; do
+  rm -f "${FAKEBIN:?}"/*
+  printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/$pm"; chmod +x "$FAKEBIN/$pm"
+  hint="$(PATH="$FAKEBIN:/usr/bin:/bin" "$SUSHI" __fzfhint)"
+  assert_has "the fzf hint knows $pm" "fzf" "$hint"
+  assert_lacks "and does not say brew when only $pm is there" "brew" "$hint"
+done
+rm -f "${FAKEBIN:?}"/*
+hint="$(PATH="$FAKEBIN:/usr/bin:/bin" "$SUSHI" __fzfhint)"
+assert_has "with no package manager it points at the project" "github.com/junegunn/fzf" "$hint"
+
+printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/apt-get"; chmod +x "$FAKEBIN/apt-get"
+out="$(HOME="$IH" SHELL=/bin/zsh PATH="$FAKEBIN:/usr/bin:/bin" \
+       run_bounded "$IH" 20 __fzfhint)"
+assert_eq "the engine's hint is a single line" "1" "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+
+# install.sh, non-interactive, no fzf on PATH: warns with the right command and
+# exits on its own rather than waiting on a prompt nobody can answer
+insout="$WORK/insout"
+( HOME="$IH" SHELL=/bin/zsh PATH="$FAKEBIN:/usr/bin:/bin" "$ROOT/install.sh" \
+    >"$insout" 2>&1 </dev/null ) & inspid=$!
+i=0
+while kill -0 "$inspid" 2>/dev/null && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+if kill -0 "$inspid" 2>/dev/null; then
+  kill -9 "$inspid" 2>/dev/null; wait "$inspid" 2>/dev/null
+  no "install.sh does not block on the fzf prompt without a terminal"
+else
+  wait "$inspid" 2>/dev/null
+  ok "install.sh does not block on the fzf prompt without a terminal"
+  assert_has "and names the platform's install command" "apt install fzf" "$(cat "$insout")"
+  assert_lacks "not brew's"                             "brew"            "$(cat "$insout")"
+fi
 
 HOME="$IH" "$ROOT/install.sh" --uninstall >/dev/null 2>&1
 zshrc="$(cat "$IH/.zshrc")"
