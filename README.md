@@ -14,20 +14,24 @@ ssh ⏎
 ```
 
 ```
-  ssh ❯ stag                                    ┌──────────────────────────────────┐
-  ENTER connect · ctrl-e edit · ctrl-r rescan   │   deploy@staging.example.com:2022 │
-                                                │                                  │
-> staging          deploy@staging.example.com…  │   resolved                       │
-  db1              luca@db1.example.com         │     user           deploy        │
-  prod-web         deploy@10.20.30.40:2222      │     hostname       staging.exa…  │
-  bastion          luca@jump.example.com        │     port           2022          │
-                                                │                                  │
-                                                │   stanza in ~/.ssh/config        │
-                                                │     Host staging                 │
-                                                │         HostName staging.exam…   │
-                                                │         User deploy              │
-                                                │         Port 2022                │
-                                                └──────────────────────────────────┘
+  ssh ❯ stag                                        ┌──────────────────────────────────┐
+  ENTER connect · ctrl-e edit · ctrl-r rescan       │   deploy@staging.example.com:2022 │
+  ALIAS       ADDED   USED  TARGET                  │                                  │
+> staging       14d     2h  deploy@staging.exa…     │   resolved                       │
+  db1           14d     1d  luca@db1.example.…      │     user           deploy        │
+  prod-web       6d     3d  deploy@10.20.30.40…     │     port           2022          │
+  bastion         -    21d  luca@jump.example…      │                                  │
+                                                    │   usage                          │
+                                                    │     added at       2026-08-06 …  │
+                                                    │     last used at   2026-08-20 …  │
+                                                    │                                  │
+                                                    │   stanza in ~/.ssh/config        │
+                                                    │     Host staging                 │
+                                                    │         HostName staging.exam…   │
+                                                    │         User deploy              │
+                                                    │         Port 2022                │
+                                                    │         # added 2026-08-06 09:12 │
+                                                    └──────────────────────────────────┘
 ```
 
 ## The idea
@@ -77,6 +81,22 @@ connect, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan history. In the `s
 The picker is ordered by how often you actually reach each host, not
 alphabetically — `bastion` being first because it starts with b is not useful. Hosts with no history
 trail at the bottom, A-Z among themselves. `SUSHI_SORT=alpha` restores plain alphabetical.
+
+Each row also carries two ages, `ADDED` and `USED`, with the full dates in the preview pane as
+`added at` and `last used at`. They sit between the alias and the target — the target is the column
+worth fuzzy-matching, so it is never padded or cut, and the alias column widens to fit the longest
+alias you have so the ages stay in line:
+
+- **`added at`** is when sushi wrote the host into your config. It is a `# added <date>` line inside
+  the stanza itself, written by `scan` and by `add` — not a database — so it survives, moves and gets
+  deleted with the stanza it belongs to. Hosts you wrote by hand, and anything imported by an older
+  sushi, read `unknown`.
+- **`last used at`** is the newest dated `ssh` to that host in your shell history, matched the same
+  way the frequency count is: on hostname+user, and on the alias itself. `never` means the history
+  has no such host; `unknown` means it has one but your shell kept no dates. Only some history
+  formats carry them — zsh with `setopt EXTENDED_HISTORY`, bash with `HISTTIMEFORMAT` set, and fish
+  always. Plain zsh and plain bash write the command and nothing else, and sushi shows a dash rather
+  than inventing a date.
 
 Other commands: `sushi list` prints the host table, `sushi edit` opens the config,
 `sushi choose` prints an alias instead of connecting (useful for your own scripts), and
@@ -242,7 +262,7 @@ Either way the command lands in your shell history, so `↑` repeats it and the 
 
 | Source | What it gives | Notes |
 | --- | --- | --- |
-| `~/.zsh_history`, `~/.bash_history`, `~/.zsh_sessions/*`, fish | user, host, port, **frequency** | the useful one |
+| `~/.zsh_history`, `~/.bash_history`, `~/.zsh_sessions/*`, fish | user, host, port, **frequency**, last use | the useful one |
 | `~/.ssh/config` | existing aliases | read, never duplicated |
 | `~/.ssh/known_hosts` | hostnames only | see below |
 | `~/.ssh/sushi-ignore` | what to leave out | see [Making things go away](#making-things-go-away) |
@@ -261,7 +281,10 @@ spaces. In the `scan` list those rows are flagged `key` and `via <bastion>`.
 History parsing handles `-p`, `-l`, `-i`, `-o`, `-J` and friends, options before *or* after the
 destination (`ssh host -p 2222` is valid OpenSSH), `ssh://user@host:port` URLs, quoting, and
 `sudo`/`&&`/`;` prefixes. It ignores `scp`, `ssh-keygen`, commented-out lines and `ssh` appearing
-inside a quoted string. Two entries for the same `user@host` — one with an explicit port, one
+inside a quoted string. Dates are read wherever the shell puts them: zsh keeps the epoch inline
+(`: 1699999999:0;ssh host`), bash writes it on the line *before* the command and fish on the line
+*after*, so those two histories are read with a line of context either side. The newest wins.
+Two entries for the same `user@host` — one with an explicit port, one
 without — collapse into a single host.
 
 ## What it does to `~/.ssh/config`

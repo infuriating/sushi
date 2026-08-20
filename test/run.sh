@@ -325,7 +325,17 @@ rsync -av ./d user@rsync.example.com:/srv/
 echo "ssh is a great tool"
 # ssh commented@out.example.com
 : 1699999999:0;ssh ts@stamped.example.com
+: 1699999999;ssh nodur@nodur.example.com
+: abc:0;ssh badstamp@bad.example.com
 - cmd: ssh fish@fish.example.com
+  when: 1700000002
+when: 1700000003
+  when: notanumber
+#1700000004
+ssh bashstamped@bs.example.com
+#not-a-stamp
+# ssh hashcomment@out.example.com
+--
 :no-semicolon ssh nosemi.example.com
    ssh    padded@pad.example.com
 EOF
@@ -1253,6 +1263,136 @@ assert_has "usage lists add"        "sushi add"     "$out"
 assert_has "usage lists --version"  "sushi --version" "$out"
 assert_has "usage still lists scan" "sushi scan"    "$out"
 assert_lacks "and stops at the code" "set -uo"      "$out"
+
+# --------------------------------------------------------------------------
+section "added at / last used at"
+
+# TZ is pinned so the rendered dates are the same everywhere, and the epochs are
+# fixed: 1700000000 is 2023-11-14 22:13 UTC.
+H="$(newhome dates)"
+cat > "$H/.ssh/config" <<'EOF'
+Host dated
+    HostName dated.example.com
+    User d
+    # added 2023-11-14 22:13
+Host undated
+    HostName undated.example.com
+    User u
+Host never
+    HostName never.example.com
+EOF
+printf ': 1700000000:0;ssh d@dated.example.com\n' > "$H/.zsh_history"
+printf 'ssh u@undated.example.com\n' > "$H/.bash_history"
+
+DCACHE="$WORK/dates-cache"
+drun() { TZ=UTC XDG_CACHE_HOME="$DCACHE" HOME="$H" SUSHI_THEME=none "$SUSHI" "$@" 2>&1; }
+
+prev="$(drun __preview dated)"
+assert_has "the preview dates the import"   "added at       2023-11-14 22:13" "$prev"
+assert_has "...and the last connection"     "last used at   2023-11-14 22:13" "$prev"
+assert_has "both carry a rough age"         "ago)"                            "$prev"
+
+# A host the history knows but cannot date is not the same as one it has never
+# heard of, and neither is an invented date.
+prev="$(drun __preview undated)"
+assert_has   "a dateless history says so"       "last used at   unknown"  "$prev"
+assert_lacks "and does not invent a date"       "1970"                    "$prev"
+prev="$(drun __preview never)"
+assert_has "a host with no history reads never" "last used at   never"    "$prev"
+assert_has "an unnoted stanza reads unknown"    "added at       unknown"  "$prev"
+
+# the picker's own columns
+lines="$(drun __lines)"
+assert_has "the row carries both ages" "d@dated.example.com" "$lines"
+row="$(printf '%s\n' "$lines" | grep '^dated ' | cut -f1)"
+# the ages themselves move with the calendar, so only their shape is pinned
+assert_eq  "alias, the two ages, then the target" "dated age age d@dated.example.com" \
+           "$(printf '%s' "$row" | awk '
+              function shape(c) { return (c ~ /^([0-9]+[mhdy]|now)$/ ? "age" : c) }
+              { print $1, shape($2), shape($3), $4 }')"
+assert_eq  "and nothing after the target" "4" "$(printf '%s' "$row" | awk '{ print NF }')"
+row="$(printf '%s\n' "$lines" | grep '^never ' | cut -f1)"
+assert_eq  "an unknown age is a dash, not a blank" "- -" "$(printf '%s' "$row" | awk '{ print $2, $3 }')"
+
+# the two extra columns must not disturb what fzf hands back
+n="$(printf '%s\n' "$lines" | awk -F'\t' 'NF != 2' | wc -l | tr -d ' ')"
+assert_eq "still exactly two columns" "0" "$n"
+assert_eq "the payload column is still the bare alias" "dated" \
+          "$(printf '%s\n' "$lines" | grep '^dated ' | cut -f2)"
+
+# ...under either ordering
+alpha="$(TZ=UTC XDG_CACHE_HOME="$DCACHE" HOME="$H" SUSHI_THEME=none SUSHI_SORT=alpha "$SUSHI" __lines 2>&1)"
+assert_eq "SUSHI_SORT=alpha keeps the columns" "4" \
+          "$(printf '%s\n' "$alpha" | grep '^dated ' | cut -f1 | awk '{ print NF }')"
+assert_eq "...and is still A-Z" "dated" "$(printf '%s\n' "$alpha" | sed -n 1p | cut -f2)"
+
+# the alias column sizes itself to the widest alias, so the ages stay in line
+H="$(newhome datewidth)"
+printf 'Host a\n    HostName a.example.com\nHost %s\n    HostName b.example.com\n' \
+  "a-very-long-alias-indeed" > "$H/.ssh/config"
+# the target is the last field, so where it starts is where the ages ended
+col="$(XDG_CACHE_HOME="$WORK/dw-cache" HOME="$H" SUSHI_THEME=none "$SUSHI" __lines 2>&1 \
+       | cut -f1 | awk '{ print index($0, $NF) }' | sort -u | wc -l | tr -d ' ')"
+assert_eq "the columns start at the same offset on every row" "1" "$col"
+
+# every shell keeps the date somewhere else: zsh inline, bash on the line before,
+# fish on the line after
+H="$(newhome dateformats)"
+mkdir -p "$H/.local/share/fish"
+printf ': 1700000000:0;ssh z@zsh.example.com\n' > "$H/.zsh_history"
+printf '#1700000001\nssh b@bash.example.com\n' > "$H/.bash_history"
+printf -- '- cmd: ssh f@fish.example.com\n  when: 1700000002\n' > "$H/.local/share/fish/fish_history"
+cand="$(run "$H" __candidates)"
+assert_has "zsh EXTENDED_HISTORY dates a host" "z|zsh.example.com||||1700000000"  "$cand"
+assert_has "bash HISTTIMEFORMAT dates a host"  "b|bash.example.com||||1700000001" "$cand"
+assert_has "fish dates a host"                 "f|fish.example.com||||1700000002" "$cand"
+
+# a date belonging to the command next door must not be borrowed
+H="$(newhome datefish)"
+mkdir -p "$H/.local/share/fish"
+printf -- '- cmd: ssh a@one.example.com\n  when: 100\n- cmd: ls\n  when: 1700000000\n- cmd: ssh b@two.example.com\n  when: 1700000009\n' \
+  > "$H/.local/share/fish/fish_history"
+cand="$(run "$H" __candidates)"
+assert_has "the host keeps its own date"    "a|one.example.com||||100"        "$cand"
+assert_has "and the next one keeps its own" "b|two.example.com||||1700000009" "$cand"
+
+# the newest wins, not the first or the last seen
+H="$(newhome datemax)"
+printf ': 1700000000:0;ssh m@many.example.com\n: 1600000000:0;ssh m@many.example.com\n' > "$H/.zsh_history"
+assert_has "the newest date wins" "2|m|many.example.com||||1700000000" "$(run "$H" __candidates)"
+
+# a shell that keeps no dates at all still counts, it just cannot date
+H="$(newhome nodates)"
+printf 'ssh p@plain.example.com\nssh p@plain.example.com\n' > "$H/.zsh_history"
+assert_has "an undated history still counts hosts" "2|p|plain.example.com|||" \
+           "$(run "$H" __candidates)"
+
+# both extractors have to make the same sense of every one of those shapes
+H="$(newhome dateextract)"
+STAMPS="$WORK/stamps"
+printf -- '#1700000001\nssh b@bs.example.com\n- cmd: ssh f@fs.example.com\n  when: 1700000002\n: 1700000003:0;ssh z@zs.example.com\n--\n#1700000004\nssh c@cs.example.com\n' \
+  > "$STAMPS"
+assert_eq "the extractors agree about dates" \
+          "$(SUSHI_EXTRACT=bash "$SUSHI" __extract < "$STAMPS")" \
+          "$("$SUSHI" __extract < "$STAMPS")"
+
+# import writes the note the picker reads back
+H="$(newhome addednote)"
+printf ': 1700000000:0;ssh deploy@fresh.example.com\n' > "$H/.zsh_history"
+out="$(import_all "$H")"
+assert_has "the stanza records when it was imported" "# added " "$out"
+assert_has "...and it lands in the config" "# added " "$(cat "$H/.ssh/config")"
+prev="$(XDG_CACHE_HOME="$WORK/added-cache" HOME="$H" SUSHI_THEME=none "$SUSHI" __preview fresh 2>&1)"
+assert_lacks "the imported host knows its own age" "added at       unknown" "$prev"
+# the note is a comment, so nothing else may notice it
+assert_lacks "the note is not mistaken for a host" "added" "$(run "$H" list | tail -n +2)"
+run "$H" __rmalias fresh > /dev/null
+assert_lacks "deleting the host takes its note with it" "# added" "$(cat "$H/.ssh/config")"
+
+# `sushi add` comes through the same builder, so it is dated too
+H="$(newhome addeddate)"
+out="$(run "$H" add luca@byhand.example.com -n)"
+assert_has "sushi add dates its stanza too" "# added " "$out"
 
 # --------------------------------------------------------------------------
 section "theme"

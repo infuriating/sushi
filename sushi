@@ -114,6 +114,88 @@ die()  { printf 'sushi: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'sushi: %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# -------------------------------------------------------------------- clock --
+#
+# `added at` and `last used at` want a date and a rough age, and awk cannot give
+# us one: strftime() is a gawk/mawk extension that onetrueawk does not have, and
+# calling `date` per row is a fork per row on top of `date -r` (BSD) and
+# `date -d` (GNU) disagreeing about how to print an epoch. So the calendar
+# arithmetic lives here, and every awk program that needs it interpolates
+# AWK_TIME and passes `now` / `tzoff` in through -v.
+NOW=""
+TZOFF=0
+clock_now() {
+  [ -n "$NOW" ] && return 0
+  local z n
+  NOW="$(date +%s 2>/dev/null)"
+  case "$NOW" in ""|*[!0-9]*) NOW=0 ;; esac
+  z="$(date +%z 2>/dev/null)"
+  case "$z" in
+    [+-][0-9][0-9][0-9][0-9])
+      # 10# or bash reads "+0200" as octal and quietly lands two hours out
+      n=$((10#${z#[+-]}))
+      TZOFF=$((n / 100 * 3600 + n % 100 * 60))
+      case "$z" in -*) TZOFF=$((0 - TZOFF)) ;; esac
+      ;;
+    *) TZOFF=0 ;;
+  esac
+  return 0
+}
+
+AWK_TIME='
+# days since 1970-01-01, and back again (Hinnant, days_from_civil)
+function dfc(y, m, d,   era, yoe, doy, doe) {
+  y += (m <= 2 ? -1 : 0)
+  era = int((y >= 0 ? y : y - 399) / 400)
+  yoe = y - era * 400
+  doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1
+  doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  return era * 146097 + doe - 719468
+}
+function cfd(z,   era, doe, yoe, y, doy, mp, d, m) {
+  z += 719468
+  era = int((z >= 0 ? z : z - 146096) / 146097)
+  doe = z - era * 146097
+  yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+  y = yoe + era * 400
+  doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100))
+  mp = int((5 * doy + 2) / 153)
+  d = doy - int((153 * mp + 2) / 5) + 1
+  m = mp + (mp < 10 ? 3 : -9)
+  return sprintf("%04d-%02d-%02d", y + (m <= 2 ? 1 : 0), m, d)
+}
+# "2026-08-14 09:41" (local) -> epoch. Anything else -> "".
+function iso2epoch(s,   t) {
+  if (s !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) return ""
+  t = dfc(substr(s, 1, 4) + 0, substr(s, 6, 2) + 0, substr(s, 9, 2) + 0) * 86400
+  if (s ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]/)
+    t += substr(s, 12, 2) * 3600 + substr(s, 15, 2) * 60
+  return t - tzoff
+}
+# epoch -> "2026-08-14 09:41", local
+function when(t,   d, s) {
+  if (t == "" || t + 0 <= 0) return ""
+  t = int(t) + tzoff
+  d = int(t / 86400); s = t - d * 86400
+  return cfd(d) sprintf(" %02d:%02d", int(s / 3600), int((s % 3600) / 60))
+}
+# epoch -> "now" / "7m" / "2h" / "14d" / "3y" — never wider than four columns
+function ago(t,   d) {
+  if (t == "" || t + 0 <= 0) return "-"
+  d = now - int(t)
+  if (d < 60) return "now"
+  if (d < 3600) return int(d / 60) "m"
+  if (d < 86400) return int(d / 3600) "h"
+  if (d < 31536000) return int(d / 86400) "d"
+  return int(d / 31536000) "y"
+}
+# the parenthetical the preview hangs off a date — "3d ago", but "just now"
+function since(t,   r) {
+  r = ago(t)
+  return (r == "now" ? "just now" : r " ago")
+}
+'
+
 # ------------------------------------------------------------------ fzf check --
 
 # How to install fzf on THIS machine. "brew install fzf" was hardcoded, which is
@@ -177,7 +259,11 @@ flatten_config() {
   done < "$file"
 }
 
-# TSV: alias \t hostname \t user \t port
+# TSV: alias \t hostname \t user \t port \t added
+#
+# `added` is whatever a `# added <when>` line inside the stanza says — sushi
+# writes one into every stanza it generates. Hosts that predate it, and
+# hand-written stanzas, simply have nothing there.
 config_hosts() {
   [ -r "$CONFIG" ] || return 0
   flatten_config "$CONFIG" | AWK '
@@ -186,12 +272,25 @@ config_hosts() {
         p = pat[i]
         if (p ~ /[*?!]/) continue
         h = (hostname != "" ? hostname : p)
-        print p "\t" h "\t" user "\t" (port != "" ? port : "22")
+        print p "\t" h "\t" user "\t" (port != "" ? port : "22") "\t" added
       }
-      n = 0; hostname = ""; user = ""; port = ""
+      n = 0; hostname = ""; user = ""; port = ""; added = ""
     }
     BEGIN { n = 0 }
-    /^[ \t]*#/ { next }
+    /^[ \t]*#/ {
+      # The one comment worth reading: the provenance note sushi writes itself.
+      # Every other comment is still skipped.
+      if (n > 0) {
+        c = $0
+        sub(/^[ \t]*#[ \t]*/, "", c)
+        if (tolower(substr(c, 1, 6)) == "added ") {
+          added = substr(c, 7)
+          sub(/[ \t]+$/, "", added)
+          gsub(/\t/, " ", added)
+        }
+      }
+      next
+    }
     NF == 0 { next }
     { k = tolower($1); sub(/=$/, "", k) }
     k == "host"     { flush(); for (i = 2; i <= NF; i++) pat[++n] = $i; next }
@@ -219,8 +318,9 @@ TAB=$'\t'
 ESC=$'\033'
 
 # Pull the destination out of one ssh command line.
-# echoes: user|host|port|identityfile|proxyjump   (any but host may be empty);
-# returns 1 if the line is not an ssh invocation.
+# $1 = the command line, $2 = the epoch it was run at, if the history knew one.
+# echoes: user|host|port|identityfile|proxyjump|epoch  (any but host may be
+# empty); returns 1 if the line is not an ssh invocation.
 #
 # THE SLOW PATH, kept deliberately. extract_stream_awk below is the same grammar
 # in awk and is what runs by default: this one is ~160us per call, which on a
@@ -240,6 +340,8 @@ extract_dest() {
   [ "$reglob" = 1 ] && set +f
 
   local n=${#t[@]} i=0 tok user="" host="" port="" identity="" jump=""
+  local ts="${2:-}"
+  case "$ts" in *[!0-9]*) ts="" ;; esac
 
   while [ "$i" -lt "$n" ]; do
     case "${t[$i]}" in
@@ -319,8 +421,9 @@ extract_dest() {
   jump="${jump%\"}"; jump="${jump#\"}"
   case "$jump" in *[!A-Za-z0-9._@:-]*) jump="" ;; esac
 
-  printf '%s%s%s%s%s%s%s%s%s\n' \
-    "$user" "$SEP" "$host" "$SEP" "$port" "$SEP" "$identity" "$SEP" "$jump"
+  printf '%s%s%s%s%s%s%s%s%s%s%s\n' \
+    "$user" "$SEP" "$host" "$SEP" "$port" "$SEP" "$identity" "$SEP" "$jump" \
+    "$SEP" "$ts"
 }
 
 # The extractor, in awk: candidate history lines on stdin, one
@@ -341,6 +444,22 @@ extract_dest() {
 # `-v q=`: the host may arrive wrapped in single quotes, and an awk program lives
 # inside a single-quoted shell string, so the character is passed in rather than
 # escaped into the source.
+# Dates, in both extractors. Every shell keeps them somewhere else, and two of
+# them keep them on a *separate* line, so this is a small state machine rather
+# than a substitution:
+#
+#   zsh EXTENDED_HISTORY  ": 1699999999:0;ssh host"   inline, same line
+#   bash HISTTIMEFORMAT   "#1699999999"               the line before
+#   fish                  "  when: 1699999999"        the line after
+#
+# fish is the awkward one: by the time the date arrives its record has already
+# been printed, so it goes downstream as an `@@TS@@|<epoch>` marker for the
+# aggregator to fold into the row above it. Only the exact shape each shell
+# writes counts as a date, so a command that merely contains `when:` is still
+# parsed as a command. Plain zsh and plain bash write no dates at all.
+#
+# Both implementations have to agree on every one of these to the byte — the test
+# suite diffs them over a corpus that includes all three shapes.
 extract_stream_awk() {
   AWK -v q="'" -v sep="$SEP" '
     function optarg(tok) { return (tok ~ /^-[bcDEeFLmOoQRSWw]$/) }
@@ -351,9 +470,32 @@ extract_stream_awk() {
     }
     {
       line = $0
+      # grep puts this between two runs of context: whatever "#<epoch>" we were
+      # holding belonged to a command that is not in this stream
+      if (line == "--") { pts = ""; next }
+      # bash HISTTIMEFORMAT, dating the command on the NEXT line
+      if (line ~ /^#[0-9]/) {
+        w = substr(line, 2)
+        pts = (w ~ /^[0-9]+$/ ? w : "")
+        next
+      }
+      # fish, dating the command on the PREVIOUS line
+      if (line ~ /^(  )?when: [0-9]/) {
+        w = line; sub(/^(  )?when: /, "", w)
+        if (w ~ /^[0-9]+$/) print "@@TS@@" sep w
+        next
+      }
+      ts = ""
       # zsh EXTENDED_HISTORY:  ": 1699999999:0;cmd"
-      if (substr(line, 1, 1) == ":" && index(line, ";") > 0)
+      if (substr(line, 1, 1) == ":" && index(line, ";") > 0) {
+        zt = substr(line, 2, index(line, ";") - 2)
+        sub(/^ /, "", zt)
+        if (index(zt, ":") > 0) zt = substr(zt, 1, index(zt, ":") - 1)
+        if (zt ~ /^[0-9]+$/) ts = zt
         line = substr(line, index(line, ";") + 1)
+      }
+      if (ts == "") ts = pts
+      pts = ""
       # fish:  "- cmd: ssh ..."
       sub(/^- cmd: /, "", line)
       # take the last segment of pipes/&&/; so `foo && ssh bar` still counts.
@@ -443,21 +585,46 @@ extract_stream_awk() {
       sub(/"$/, "", jump); sub(/^"/, "", jump)
       if (jump ~ /[^A-Za-z0-9._@:-]/) jump = ""
 
-      print user sep host sep port sep id sep jump
+      print user sep host sep port sep id sep jump sep ts
     }'
 }
 
 # The same contract as extract_stream_awk, via the bash extract_dest above.
 extract_stream_bash() {
-  local line
+  local line ts pts=""
   while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '--') pts=""; continue ;;
+      '#'[0-9]*)
+        pts="${line#\#}"
+        case "$pts" in *[!0-9]*) pts="" ;; esac
+        continue
+        ;;
+      '  when: '[0-9]*|'when: '[0-9]*)
+        # the FIRST "when: ", so a line with two of them is not a date to either
+        # implementation rather than a date to only one of them
+        ts="${line#*when: }"
+        case "$ts" in *[!0-9]*) ts="" ;; esac
+        [ -n "$ts" ] && printf '@@TS@@%s%s\n' "$SEP" "$ts"
+        continue
+        ;;
+    esac
+    ts=""
     # zsh EXTENDED_HISTORY:  ": 1699999999:0;cmd"
-    case "$line" in ':'*';'*) line="${line#*;}" ;; esac
+    case "$line" in
+      ':'*';'*)
+        ts="${line%%;*}"; ts="${ts#:}"; ts="${ts# }"; ts="${ts%%:*}"
+        case "$ts" in ""|*[!0-9]*) ts="" ;; esac
+        line="${line#*;}"
+        ;;
+    esac
+    [ -n "$ts" ] || ts="$pts"
+    pts=""
     # fish:  "- cmd: ssh ..."
     case "$line" in '- cmd: '*) line="${line#- cmd: }" ;; esac
     # take the last segment of pipes/&&/; so `foo && ssh bar` still counts
     line="${line##*&& }"; line="${line##*; }"; line="${line##*| }"
-    extract_dest "$line" 2>/dev/null
+    extract_dest "$line" "$ts" 2>/dev/null
   done
   return 0
 }
@@ -483,7 +650,10 @@ history_files() {
   done
 }
 
-# Records: count|user|host|port   (most-used first)
+# Records: count|user|host|port|identityfile|proxyjump|last  (most-used first)
+#
+# `last` is the epoch of the newest invocation the history could date, or empty.
+# See the note above extract_stream_awk for where each shell keeps it.
 scan_history() {
   local line
   local -a files=()
@@ -499,9 +669,36 @@ scan_history() {
   # to match inside a line whose bytes are not valid encoding, which would drop
   # the ssh command sitting next to a bad paste. "ssh" is ASCII, so byte matching
   # is strictly more inclusive and never less correct.
-  LC_ALL=C grep -hF ssh -- "${files[@]}" 2>/dev/null \
+  # -B1 -A1 because bash and fish keep the date on the line before / after the
+  # command, so the date is not on the line grep matched. It is only worth the
+  # extra lines because the extractor is awk: three candidate lines where there
+  # was one costs ~4ms on a 20k-line history, where a bash-function-per-line
+  # parser would have made it ~450ms.
+  LC_ALL=C grep -hF -B1 -A1 ssh -- "${files[@]}" 2>/dev/null \
     | extract_stream \
-    | sort | uniq -c | sed 's/^ *//; s/ /|/' \
+    | AWK -v sep="$SEP" '
+        # `sort | uniq -c` cannot do the counting any more: the dates differ line
+        # to line, so every row would be unique. Counting here instead is also
+        # what lets a trailing fish marker land on the row it dates.
+        BEGIN { FS = sep }
+        $1 == "@@TS@@" {
+          if (pend != "" && $2 + 0 > last[pend] + 0) last[pend] = $2
+          pend = ""                      # one marker, one record — the next
+          next                           # one belongs to somebody else
+        }
+        {
+          key = $1 "|" $2 "|" $3 "|" $4 "|" $5
+          if (!(key in cnt)) order[++m] = key
+          cnt[key]++
+          if ($6 != "") {
+            if ($6 + 0 > last[key] + 0) last[key] = $6
+            pend = ""
+          } else pend = key
+        }
+        END {
+          for (i = 1; i <= m; i++) print cnt[order[i]] "|" order[i] "|" last[order[i]]
+        }' \
+    | sort -t"$SEP" -k2 \
     | AWK -F'[|]' '
         # Fold "same user@host, port unknown" rows into the port we did observe,
         # so `ssh -p 2022 x@h` and `ssh x@h` do not become two separate hosts.
@@ -513,6 +710,7 @@ scan_history() {
             empty[key] += $1
             if ($5 != "" && eid[key] == "") eid[key] = $5
             if ($6 != "" && ejp[key] == "") ejp[key] = $6
+            if ($7 + 0 > elast[key] + 0) elast[key] = $7
             next
           }
           pk = key "|" $4
@@ -520,6 +718,7 @@ scan_history() {
           cnt[pk] += $1
           if ($5 != "" && id[pk] == "") id[pk] = $5
           if ($6 != "" && jp[pk] == "") jp[pk] = $6
+          if ($7 + 0 > lst[pk] + 0) lst[pk] = $7
           if (cnt[pk] > best[key]) { best[key] = cnt[pk]; bestpk[key] = pk }
         }
         END {
@@ -529,15 +728,16 @@ scan_history() {
               cnt[pk] += empty[k]
               if (id[pk] == "" && eid[k] != "") id[pk] = eid[k]
               if (jp[pk] == "" && ejp[k] != "") jp[pk] = ejp[k]
+              if (elast[k] + 0 > lst[pk] + 0) lst[pk] = elast[k]
             } else {
               pk = k "|"; order[++m] = pk; cnt[pk] = empty[k]
-              id[pk] = eid[k]; jp[pk] = ejp[k]
+              id[pk] = eid[k]; jp[pk] = ejp[k]; lst[pk] = elast[k]
             }
           }
           for (i = 1; i <= m; i++) {
             pk = order[i]
             split(pk, a, "|")
-            print cnt[pk] "|" a[1] "|" a[2] "|" a[3] "|" id[pk] "|" jp[pk]
+            print cnt[pk] "|" a[1] "|" a[2] "|" a[3] "|" id[pk] "|" jp[pk] "|" lst[pk]
           }
         }' \
     | sort -rn
@@ -572,11 +772,15 @@ scan_known_hosts() {
 # it, and only ever with a single record — forcing a name for a whole batch would
 # give every stanza the same one.
 build_additions() {
-  local forced="${1:-}"
+  local forced="${1:-}" added
+  # One `date` per batch, and the picker reads it back out of the stanza —
+  # nothing sushi knows about a host lives anywhere but the config. Both `scan`
+  # and `add` come through here, so both get the note.
+  added="$(date '+%Y-%m-%d %H:%M' 2>/dev/null)"
   { config_hosts | AWK -F'\t' '{ print tolower($1) }'
     printf '%s\n' '@@SUSHI_SELECTED@@'
     cat
-  } | AWK -v sep="$SEP" -v forced="$forced" '
+  } | AWK -v sep="$SEP" -v forced="$forced" -v added="$added" '
       # ${host%%.*} for a name, srv-1-2-3-4 for a bare IP, then the same
       # lowercase-and-replace-the-rest that `tr A-Z a-z | tr -c a-z0-9._- -` did.
       function sanitize(h,   b) {
@@ -618,6 +822,7 @@ build_additions() {
         # a specific key or a bastion imports without hand-editing.
         if (id != "")   print "    IdentityFile " id
         if (jump != "") print "    ProxyJump " jump
+        if (added != "") print "    # added " added
         print ""
       }'
 }
@@ -880,7 +1085,7 @@ scan_candidates() {
         if (host == "") next
         h = tolower(host)
         if (boring(h) || h in name || h in alias || h in seen) next
-        print "0||" host "|||"
+        print "0||" host "||||"
       }
     '
 }
@@ -894,7 +1099,7 @@ menu_from_candidates() {
   local line count user host port identity jump
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    IFS="$SEP" read -r count user host port identity jump <<< "$line"
+    IFS="$SEP" read -r count user host port identity jump _ <<< "$line"
     [ -n "${host:-}" ] || continue
     is_ignored "$user" "$host" && continue
     # One printf per row, no command substitution: this runs for every row on
@@ -975,7 +1180,7 @@ cmd_scan() {
   scan_candidates > "$cache"
   menu="$(menu_from_candidates < "$cache")"
 
-  while IFS="$SEP" read -r count user host port identity jump; do
+  while IFS="$SEP" read -r count user host port identity jump _; do
     [ -n "${host:-}" ] || continue
     is_ignored "$user" "$host" && hidden=$((hidden + 1))
   done < "$cache"
@@ -1168,7 +1373,7 @@ ignore_rows() {
 
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    IFS="$SEP" read -r count user host port identity jump <<< "$line"
+    IFS="$SEP" read -r count user host port identity jump _ <<< "$line"
     # Already dismissed: offering it again in the very picker you dismissed it
     # from is just noise. `sushi ignore --list` and `--remove` are where the
     # ignore list itself is visible.
@@ -1368,10 +1573,15 @@ cmd_list() {
 
 # What fzf shows in the side panel for the highlighted alias.
 cmd_preview() {
-  local a="${1:-}" line key val
+  local a="${1:-}" line key val facts
   [ -n "$a" ] || return 0
 
-  config_hosts | AWK -F'\t' -v a="$a" -v c="$C_ROSE" -v z="$C_OFF" '$1 == a {
+  # Captured, not piped twice: the target line and the usage block both want it,
+  # and host_facts parses the whole config.
+  clock_now
+  facts="$(host_facts)"
+
+  printf '%s\n' "$facts" | AWK -F'\t' -v a="$a" -v c="$C_ROSE" -v z="$C_OFF" '$1 == a {
     printf "  %s%s%s%s%s\n", c, ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : ""), z
   }'
 
@@ -1393,6 +1603,21 @@ cmd_preview() {
       esac
     done
   fi
+
+  # `added at` is only ever as good as the note in the stanza, `last used at`
+  # only as good as the dates your shell keeps, and both say so rather than
+  # guessing: "never" means the history has no such host at all, "unknown" means
+  # it has one but no date to go with it.
+  printf '%s\n' "$facts" | AWK -F'\t' -v a="$a" -v d="$C_DIM" -v r="$C_RICE" \
+      -v v="$C_VIOLET" -v z="$C_OFF" -v now="$NOW" -v tzoff="$TZOFF" "$AWK_TIME"'
+      $1 == a {
+        ad = iso2epoch($5)
+        printf "\n  %susage%s\n", v, z
+        printf "    %s%-14s%s %s%s%s\n", d, "added at", z, r, \
+          (ad != "" ? $5 "  (" since(ad) ")" : "unknown"), z
+        printf "    %s%-14s%s %s%s%s\n", d, "last used at", z, r, \
+          ($7 != "" ? when($7) "  (" since($7) ")" : ($6 + 0 > 0 ? "unknown" : "never")), z
+      }'
 
   local disp="$CONFIG"
   # shellcheck disable=SC2088  # a literal ~ is what we want to display
@@ -1427,7 +1652,9 @@ scan_history_cached() {
   fi
   sig="${#files[@]}:$(wc -c -- "${files[@]}" 2>/dev/null | tail -1 | AWK '{ print $1 }')"
 
-  if [ -r "$f" ] && IFS= read -r line < "$f" && [ "$line" = "#sig $sig" ]; then
+  # The tag is part of the signature: a cache written before the records grew a
+  # date column would otherwise read as a perfectly good hit.
+  if [ -r "$f" ] && IFS= read -r line < "$f" && [ "$line" = "#sig2 $sig" ]; then
     tail -n +2 "$f"
     return 0
   fi
@@ -1445,7 +1672,7 @@ scan_history_cached() {
   if mkdir -p "$dir" 2>/dev/null; then
     chmod 700 "$dir" 2>/dev/null
     if ( umask 077
-         { printf '#sig %s\n' "$sig"; printf '%s\n' "$out"; } > "$f.tmp" ) 2>/dev/null
+         { printf '#sig2 %s\n' "$sig"; printf '%s\n' "$out"; } > "$f.tmp" ) 2>/dev/null
     then
       mv "$f.tmp" "$f" 2>/dev/null   # mv keeps the mode the umask gave it
     fi
@@ -1453,53 +1680,92 @@ scan_history_cached() {
   printf '%s\n' "$out"
 }
 
-# "alias   user@host:port <TAB> alias" — column 1 is shown, column 2 is the payload
+# Every host in the config, with the facts only the history knows bolted on:
+#
+#   alias \t hostname \t user \t port \t added \t count \t last-used-epoch
+#
+# Two streams behind a marker, the usual shape — a multi-line `awk -v` breaks on
+# macOS awk. Usage is matched on hostname+user, so it survives renaming an alias,
+# and on the alias itself, which catches `ssh staging` where the alias IS what
+# you typed. `count` and `last` come off the same key, so a host found by its
+# alias is dated by those rows too.
+host_facts() {
+  {
+    scan_history_cached
+    printf '%s\n' '@@SUSHI_CONFIG@@'
+    config_hosts
+  } | AWK '
+      BEGIN { FS = "|"; mode = 0 }
+      $0 == "@@SUSHI_CONFIG@@" { mode = 1; FS = "\t"; next }
+      mode == 0 {
+        # count|user|host|port|identity|jump|last
+        k = tolower($3) SUBSEP tolower($2)
+        used[k] += $1
+        if ($7 + 0 > lastk[k] + 0) lastk[k] = $7
+        b = tolower($3)
+        bare[b] += $1
+        if ($7 + 0 > lastb[b] + 0) lastb[b] = $7
+        next
+      }
+      mode == 1 {
+        split($0, f, "\t")
+        if (f[1] == "") next
+        k = tolower(f[2]) SUBSEP tolower(f[3])
+        n = used[k]; lu = lastk[k]
+        if (n == 0) { b = tolower(f[1]); n = bare[b]; lu = lastb[b] }
+        print f[1] "\t" f[2] "\t" f[3] "\t" f[4] "\t" f[5] "\t" n "\t" lu
+      }
+    '
+}
+
+# The width the alias column is padded to, so the two age columns line up: the
+# widest alias there is, within reason — a 60-character alias would otherwise
+# shove the target off the right edge of every row. run_picker needs the same
+# number to line its header up, which is why this is a function and not a
+# constant computed inside picker_lines.
+alias_width() {
+  config_hosts | AWK -F'\t' '
+    { if (length($1) > m) m = length($1) }
+    END { print (m < 12 ? 12 : (m > 32 ? 32 : m)) }'
+}
+
+# "alias   added   used   user@host:port <TAB> alias" — column 1 is shown,
+# column 2 is the payload.
 #
 # Ordered by how often you actually reach each host, not alphabetically: the
 # counts already come out of the history scan, and `bastion` being first because
 # it starts with b is not useful. Hosts with no history fall to the bottom,
 # alphabetically among themselves. SUSHI_SORT=alpha restores plain A-Z.
 #
-# Usage is matched on hostname+user, so it survives renaming an alias, and on the
-# alias itself, which catches `ssh staging` where the alias IS what you typed.
+# The ages sit between the alias and the target rather than after it: the target
+# is the one column here worth fuzzy-matching, so it is never padded and never
+# cut, and it is also the only one whose length varies enough to knock everything
+# to its right out of line.
+#
+# $1 = the alias column width, if the caller already worked it out.
 picker_lines() {
+  clock_now
+  local aw="${1:-}"
+  [ -n "$aw" ] || aw="$(alias_width)"
+  local -a key
   if [ "${SUSHI_SORT:-usage}" = alpha ]; then
-    config_hosts | sort -f | AWK -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
-      {
-        tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
-        printf "%s%-22s%s %s%s%s\t%s\n", a, $1, z, t, tgt, z, $1
-      }'
-    return 0
+    key=("-k3,3f")
+  else
+    # used-or-not, then count descending, then name — so your daily hosts lead
+    # and the cold ones trail in A-Z
+    key=("-k1,1n" "-k2,2nr" "-k3,3f")
   fi
 
-  # Two streams behind a marker, the usual shape — a multi-line `awk -v` breaks
-  # on macOS awk.
-  {
-    scan_history_cached
-    printf '%s\n' '@@SUSHI_CONFIG@@'
-    config_hosts
-  } | AWK -v a="$C_RICE" -v t="$C_DIM" -v z="$C_OFF" '
-      BEGIN { FS = "|"; mode = 0 }
-      $0 == "@@SUSHI_CONFIG@@" { mode = 1; FS = "\t"; next }
-      mode == 0 {
-        # count|user|host|port|...  — key on host+user and on the bare host, so a
-        # bare `ssh alias` in the history counts for that alias too
-        used[tolower($3) SUBSEP tolower($2)] += $1
-        bare[tolower($3)] += $1
-        next
+  host_facts | AWK -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v v="$C_VIOLET" -v z="$C_OFF" \
+      -v aw="$aw" -v now="$NOW" -v tzoff="$TZOFF" "$AWK_TIME"'
+      {
+        tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
+        # the first three columns are sort keys, stripped again below
+        printf "%d\t%d\t%s\t%s%-*s%s  %s%5s  %5s%s  %s%s%s\t%s\n", \
+          ($6 > 0 ? 0 : 1), $6, $1, \
+          a, aw, $1, z, v, ago(iso2epoch($5)), ago($7), z, t, tgt, z, $1
       }
-      mode == 1 {
-        split($0, f, "\t")
-        if (f[1] == "") next
-        n = used[tolower(f[2]) SUBSEP tolower(f[3])]
-        if (n == 0) n = bare[tolower(f[1])]
-        tgt = (f[3] != "" ? f[3] "@" : "") f[2] (f[4] != "22" ? ":" f[4] : "")
-        # sort columns, stripped below: used-or-not, then count descending,
-        # then name — so your daily hosts lead and the cold ones trail in A-Z
-        printf "%d\t%d\t%s\t%s%-22s%s %s%s%s\t%s\n", \
-          (n > 0 ? 0 : 1), n, f[1], a, f[1], z, t, tgt, z, f[1]
-      }
-    ' | sort -t"$(printf '\t')" -k1,1n -k2,2nr -k3,3f | cut -f4-
+    ' | sort -t"$TAB" "${key[@]}" | cut -f4-
 }
 
 # Runs fzf and prints the chosen alias on stdout — nothing else goes to stdout,
@@ -1509,8 +1775,9 @@ picker_lines() {
 run_picker() {
   # "nothing to pick from" before "install fzf": with an empty config the first
   # is the actionable message, and fzf would have nothing to show either way.
-  local lines out key rec
-  lines="$(picker_lines)"
+  local lines out key rec aw
+  aw="$(alias_width)"
+  lines="$(picker_lines "$aw")"
   if [ -z "$lines" ]; then
     warn "no hosts in $CONFIG yet — run: sushi scan"
     return 1
@@ -1520,7 +1787,8 @@ run_picker() {
   out="$(printf '%s\n' "$lines" \
     | FZF --ansi --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
         --prompt='ssh ❯ ' --query="${1:-}" \
-        --header=$'ENTER connect · ctrl-e edit config · ctrl-r rescan history' \
+        --header="$(printf 'ENTER connect · ctrl-e edit config · ctrl-r rescan history\n%-*s  %5s  %5s  %s' \
+                     "$aw" ALIAS ADDED USED TARGET)" \
         --expect=ctrl-e,ctrl-r \
         --preview="'$SELF' __preview {2}" \
         --preview-window='right:45%')"
