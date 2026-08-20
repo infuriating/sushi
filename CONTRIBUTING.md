@@ -1,16 +1,17 @@
 # Contributing
 
-Bug reports and patches welcome. The project is deliberately small: two files of shell, no
-dependencies beyond fzf, no build step.
+Bug reports and patches welcome. The project is deliberately small: `sushi` + `lib/*.sh` +
+`sushi.zsh`, no dependencies beyond fzf, no build step.
 
 ## Before opening a PR
 
 ```bash
 ./test/run.sh
-shellcheck -S warning sushi install.sh test/run.sh
+shellcheck -S warning -x sushi install.sh test/run.sh
 ```
 
-Both must be clean. CI runs the same two things on Linux and macOS.
+`-x` follows the `source` chain into `lib/*.sh`. Both must be clean. CI runs the same two
+things on Linux and macOS.
 
 ## Ground rules
 

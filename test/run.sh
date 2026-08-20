@@ -107,6 +107,11 @@ import_all() {
 section "static checks"
 
 if bash -n "$SUSHI" 2>/dev/null; then ok "sushi parses under bash"; else no "sushi parses under bash"; fi
+lib_ok=1
+for f in "$ROOT"/lib/*.sh; do
+  if ! bash -n "$f" 2>/dev/null; then lib_ok=0; break; fi
+done
+if [ "$lib_ok" = 1 ]; then ok "lib/*.sh parse under bash"; else no "lib/*.sh parse under bash"; fi
 
 if command -v zsh >/dev/null 2>&1; then
   if zsh -n "$ROOT/sushi.zsh" 2>/dev/null; then ok "sushi.zsh parses under zsh"; else no "sushi.zsh parses under zsh"; fi
@@ -115,7 +120,7 @@ else
 fi
 
 if command -v shellcheck >/dev/null 2>&1; then
-  out="$(shellcheck -S warning "$SUSHI" 2>&1)"
+  out="$(shellcheck -S warning -x "$SUSHI" 2>&1)"
   assert_eq "shellcheck clean at warning level" "" "$out"
 else
   skip "shellcheck" "not installed"
@@ -784,7 +789,7 @@ rm -rf "$WORK/fakebin"
 # The other three pickers — scan, ignore, un-ignore — need a terminal to reach,
 # so they are checked at the source: no call site may name an inline height.
 assert_eq "no picker hardcodes an inline height" "" \
-          "$(grep -v '^[[:space:]]*#' "$SUSHI" | grep -o -- '--height=[0-9]*%' \
+          "$(grep -h -v '^[[:space:]]*#' "$SUSHI" "$ROOT"/lib/*.sh | grep -o -- '--height=[0-9]*%' \
              | grep -v '^--height=100%$' | sort -u | tr '\n' ' ' | sed 's/ $//')"
 
 # no history: every host is unused, so A-Z
@@ -2087,7 +2092,7 @@ FZFFN="$WORK/fzf_install_cmd.sh"
 mkdir -p "$FAKEBIN"
 {
   printf 'have() { command -v "$1" >/dev/null 2>&1; }\n'
-  sed -n '/^fzf_install_cmd()/,/^}/p' "$SUSHI"
+  sed -n '/^fzf_install_cmd()/,/^}/p' "$ROOT/lib/util.sh"
   printf 'fzf_install_cmd\n'
 } > "$FZFFN"
 
