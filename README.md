@@ -105,8 +105,9 @@ alias you have so the ages stay in line:
   than inventing a date.
 
 Other commands: `sushi list` prints the host table, `sushi edit` opens the config,
-`sushi choose` prints an alias instead of connecting (useful for your own scripts), and
-`sushi --version` says which build you are on (plus the commit, since `git pull` is the update).
+`sushi theme` shows the palette in force and where to put your own, `sushi choose` prints an alias
+instead of connecting (useful for your own scripts), and `sushi --version` says which build you are
+on (plus the commit, since `git pull` is the update).
 
 `sushi <TAB>` completes subcommands and your imported aliases. `ssh <TAB>` is deliberately left
 alone: sushi writes real `Host` stanzas, so zsh's own `_ssh` already knows every alias — that is
@@ -190,7 +191,52 @@ Cyan through violet to magenta, on the near-black of the nori — the same palet
 The background is deliberately `-1`, so your terminal's own background and transparency show
 through rather than being painted over.
 
-Two escape hatches:
+That palette is a YAML file, so it is not the one you have to live with:
+
+```bash
+sushi theme                              # what you are running, and where to put your own
+mkdir -p ~/.config/sushi/themes
+cp ~/sushi/themes/sushi.yaml ~/.config/sushi/themes/mine.yaml
+$EDITOR ~/.config/sushi/themes/mine.yaml
+SUSHI_THEME=mine sushi theme             # see it before you commit to it
+echo 'export SUSHI_THEME=mine' >> ~/.zshrc
+```
+
+A theme names six roles and the fzf colours, and nothing else — there is no layout or keybinding in
+there, only colour:
+
+```yaml
+name: mine
+
+accent:  "#22c7e8"   # match highlights, markers, key paths
+heading: "#8c6fe0"   # headers and section labels
+prompt:  "#ec4899"   # the `imported` tag
+target:  "#f472b6"   # the resolved target in the preview
+value:   bold "#fdf7fb"   # aliases and values
+muted:   "#7a6e91"   # ages, keys, everything secondary
+
+fzf:                 # handed to fzf as --color=..., verbatim
+  hl: "#22c7e8"
+  bg: "-1"
+
+symbols:
+  pointer: "▍"
+  marker: "◆"
+```
+
+A colour is `"#rrggbb"`, the `"#rgb"` short form, a 0-255 terminal palette index, or `none`, and may
+be preceded by any of `bold`, `dim`, `italic`, `underline`, `reverse`. Quote the hex: bare `#` starts
+a YAML comment. Every key is optional — a theme is read on top of the built-in one, so a file with
+two lines in it is a valid theme, and `none` on a role switches just that role off.
+
+`SUSHI_THEME` takes a name or a path. A name is looked for in `$SUSHI_THEME_DIR`, then
+`~/.config/sushi/themes` (which a `git pull` never touches), then `themes/` in the clone — sushi
+ships `sushi` and `ansi` there, the second in terminal palette indexes so it follows whatever colour
+scheme your terminal already has. `SUSHI_THEME=sushi` is the default and reads no file at all.
+Anything sushi cannot parse is named on stderr and skipped rather than taking the picker down with
+it — you can still reach your servers with a half-broken theme.
+
+Two escape hatches, for opting out rather than editing:
 
 ```bash
 SUSHI_THEME=none            # no colours at all; FZF_DEFAULT_OPTS decides

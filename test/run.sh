@@ -1592,6 +1592,127 @@ out="$(HOME="$H" SUSHI_FZF_OPTS='--nonsense' "$SUSHI" list 2>&1)"
 assert_has "SUSHI_FZF_OPTS does not affect non-fzf commands" "alpha" "$out"
 
 # --------------------------------------------------------------------------
+section "theming"
+
+TH="$WORK/themes"; mkdir -p "$TH"
+theme() { TH_FILE="$1"; shift; HOME="$H" SUSHI_THEME="$TH_FILE" "$SUSHI" "$@" 2>&1; }
+
+# themes/sushi.yaml is documented as the built-in palette written out as YAML,
+# and it is what everyone copies to make their own. The built-in is precomputed
+# rather than parsed — that is the only reason the picker does not pay for the
+# parser on every invocation — so nothing but this test keeps the two in step.
+strip_source() { grep -v 'source\|read on top'; }
+assert_eq  "themes/sushi.yaml renders exactly like the built-in theme" \
+           "$(HOME="$H" "$SUSHI" theme 2>&1 | strip_source)" \
+           "$(HOME="$H" SUSHI_THEME="$ROOT/themes/sushi.yaml" "$SUSHI" theme 2>&1 | strip_source)"
+assert_eq  "...down to the bytes on the picker rows" \
+           "$(HOME="$H" "$SUSHI" __lines 2>&1)" \
+           "$(HOME="$H" SUSHI_THEME="$ROOT/themes/sushi.yaml" "$SUSHI" __lines 2>&1)"
+
+# the default reads no file at all, so a clone with no themes/ still has colour
+assert_has "the built-in theme needs no file" "built-in" "$(theme sushi theme)"
+assert_has "and names itself"                 "sushi"    "$(theme sushi theme)"
+
+# every shipped theme has to parse cleanly — a warning here is a broken theme
+for f in "$ROOT"/themes/*.yaml; do
+  out="$(HOME="$H" SUSHI_THEME="$f" "$SUSHI" __lines 2>&1 >/dev/null)"
+  assert_eq "themes/$(basename "$f") parses without complaint" "" "$out"
+done
+
+# hex, the #abc shorthand, palette indexes and attributes
+cat > "$TH/full.yaml" <<'YAML'
+name: full
+accent: "#010203"
+heading: "#f0a"
+prompt: 244
+target: bold "#ffffff"
+value: underline
+muted: dim italic 8
+YAML
+out="$(theme "$TH/full.yaml" theme)"
+assert_has "#rrggbb becomes a truecolour escape" "${esc}[38;2;1;2;3m"       "$out"
+assert_has "#abc expands to #aabbcc"             "${esc}[38;2;255;0;170m"   "$out"
+assert_has "a number is a palette index"         "${esc}[38;5;244m"         "$out"
+assert_has "attributes come before the colour"   "${esc}[1;38;2;255;255;255m" "$out"
+assert_has "an attribute on its own is allowed"  "${esc}[4m"                "$out"
+assert_has "several attributes and an index"     "${esc}[2;3;38;5;8m"       "$out"
+
+# "none" is how you switch one role off without switching the theme off
+printf 'value: none\n' > "$TH/off.yaml"
+assert_lacks "a role set to none is not coloured" "${esc}[1;38;2;253;247;251m" \
+             "$(theme "$TH/off.yaml" __lines)"
+
+# a partial theme is the common case: change two colours, inherit the rest
+printf 'name: two\naccent: 2\nfzf:\n  hl: 2\n' > "$TH/two.yaml"
+out="$(theme "$TH/two.yaml" theme)"
+assert_has "a partial theme keeps the built-in heading" "#8c6fe0" "$out"
+assert_has "and its own accent"                        "38;5;2"   "$out"
+plainout="$(printf '%s\n' "$out" | sed "s/${esc}\[[0-9;]*m//g;s/^ *//;s/  *$//")"
+assert_eq  "an overridden fzf key is passed once, not twice" "1" \
+           "$(printf '%s\n' "$plainout" | grep -c '^hl  *2$' | tr -d ' ')"
+assert_eq  "and the built-in value for it is gone"           "0" \
+           "$(printf '%s\n' "$plainout" | grep -c '^hl  *#22c7e8$' | tr -d ' ')"
+
+# a comment where the value would be is still a section header, which is how
+# anyone annotating their own theme file will write it
+cat > "$TH/cmt.yaml" <<'YAML'
+# a whole-line comment
+accent: "#010203"   # and a trailing one
+fzf:                # including here, where a section opens
+  hl: 2
+symbols:
+  pointer: ">"
+YAML
+out="$(theme "$TH/cmt.yaml" theme 2>&1)"
+assert_lacks "comments never look like values"  "unknown key"            "$out"
+assert_has   "a trailing comment is not colour" "${esc}[38;2;1;2;3m"     "$out"
+assert_has   "and the section under one is read" "hl"                    "$out"
+
+# the yaml actually reaches the rows, not just `sushi theme`
+lines="$(theme "$TH/two.yaml" __lines)"
+assert_has "a theme colours the picker rows" "${esc}[" "$lines"
+printf 'value: "#010203"\n' > "$TH/acc.yaml"
+assert_has "and the colour in the file is the colour in the preview" \
+           "${esc}[38;2;1;2;3m" "$(theme "$TH/acc.yaml" __preview alpha)"
+
+# a broken theme has to say so and keep working: sushi is how you reach a server
+cat > "$TH/bad.yaml" <<'YAML'
+accent: "#zzzzzz"
+heading: 300
+bogus: 1
+this line has no colon
+YAML
+out="$(theme "$TH/bad.yaml" __lines)"
+assert_has "a bad colour is named"        "not a colour: #zzzzzz"     "$out"
+assert_has "so is an out-of-range index"  "index out of range: 300"   "$out"
+assert_has "so is an unknown key"         "unknown key: bogus"        "$out"
+assert_has "so is a line it cannot parse" "cannot parse: this line"   "$out"
+assert_has "and the host list still comes out" "alpha" "$out"
+
+# a name is looked up in SUSHI_THEME_DIR, then ~/.config, then the clone
+printf 'name: fromdir\naccent: 4\n' > "$TH/mine.yaml"
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" SUSHI_THEME=mine "$SUSHI" theme 2>&1)"
+assert_has "SUSHI_THEME=<name> finds SUSHI_THEME_DIR/<name>.yaml" "mine.yaml" "$out"
+mkdir -p "$H/.config/sushi/themes"
+printf 'name: fromconfig\n' > "$H/.config/sushi/themes/mine.yaml"
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" SUSHI_THEME=mine "$SUSHI" theme 2>&1)"
+assert_has "SUSHI_THEME_DIR wins over ~/.config" "$TH/mine.yaml" "$out"
+out="$(HOME="$H" SUSHI_THEME=mine "$SUSHI" theme 2>&1)"
+assert_has "the config dir under $HOME is searched" "$H/.config/sushi/themes/mine.yaml" "$out"
+printf 'name: fromyml\n' > "$TH/short.yml"
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" SUSHI_THEME=short "$SUSHI" theme 2>&1)"
+assert_has ".yml is accepted too" "short.yml" "$out"
+out="$(HOME="$H" SUSHI_THEME_DIR="$TH" SUSHI_THEME=nosuchtheme "$SUSHI" __lines 2>&1)"
+assert_has "an unknown theme name says so"     "no theme named nosuchtheme" "$out"
+assert_has "and falls back to the built-in"    "alpha"                      "$out"
+out="$(theme "$TH/nothere.yaml" __lines)"
+assert_has "an unreadable theme file says so"  "cannot read theme"          "$out"
+
+# SUSHI_THEME=none still wins over everything, including a file that exists
+out="$(HOME="$H" SUSHI_THEME=none "$SUSHI" theme 2>&1)"
+assert_lacks "SUSHI_THEME=none emits no escapes from theme" "${esc}[" "$out"
+
+# --------------------------------------------------------------------------
 section "empty state"
 
 H="$(newhome empty)"

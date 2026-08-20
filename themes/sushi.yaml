@@ -1,0 +1,37 @@
+# The sushi palette. Copy this file to ~/.config/sushi/themes/<name>.yaml, edit
+# it, and check the result with `SUSHI_THEME=<name> sushi theme`.
+name: sushi
+
+# The six roles sushi paints with. Each value is a colour — "#rrggbb", "#rgb",
+# a 0-255 terminal palette index, or "none" — optionally preceded by any of
+# bold, dim, italic, underline, reverse.
+accent:  "#22c7e8"          # match highlights, markers, key paths
+heading: "#8c6fe0"          # headers and section labels
+prompt:  "#ec4899"          # the `imported` tag
+target:  "#f472b6"          # the resolved target in the preview
+value:   bold "#fdf7fb"     # aliases and values
+muted:   "#7a6e91"          # ages, keys, everything secondary
+
+# Handed to fzf as --color=..., verbatim. Only the keys every fzf since 0.24
+# understands are used here: `label` and `preview-border` look better but make
+# older versions exit with a usage error, so adding them is your own risk. "-1"
+# leaves that part to the terminal, which is why the background shows through.
+fzf:
+  fg: "#a99fbd"
+  bg: "-1"
+  hl: "#22c7e8"
+  fg+: "#fdf7fb"
+  bg+: "#241a33"
+  hl+: "#5ad9f5"
+  info: "#8c6fe0"
+  prompt: "#ec4899"
+  pointer: "#ec4899"
+  marker: "#22c7e8"
+  border: "#5b4a7d"
+  spinner: "#8c6fe0"
+  header: "#8c6fe0"
+  gutter: "-1"
+
+symbols:
+  pointer: "▍"
+  marker: "◆"

@@ -11,12 +11,14 @@
 #   sushi ignore -l    show the ignore list
 #   sushi list         print the host table (no fzf needed)
 #   sushi edit         open ~/.ssh/config in $EDITOR
+#   sushi theme        show the active theme, where it came from, and where to put one
 #   sushi choose       print the chosen alias instead of connecting
 #   sushi --version    print the version
 #
 # Requires: bash 3.2+, awk, ssh. fzf only for the picker.
 # Shell integration (bare `ssh` opens the picker) lives in sushi.zsh.
 # Files: ~/.ssh/config (SUSHI_CONFIG), ~/.ssh/sushi-ignore (SUSHI_IGNORE)
+#        themes/<name>.yaml, ~/.config/sushi/themes/<name>.yaml (SUSHI_THEME)
 
 set -uo pipefail
 
@@ -33,7 +35,11 @@ END_MARK="# <<< sushi managed hosts <<<"
 # `sushi __subcommands` so sushi.zsh's wrapper function does not have to keep a
 # second copy in sync — it got one wrong once and silently turned `sushi ignore`
 # into a picker search for the word "ignore".
-SUBCOMMANDS='scan add ignore delete rm list ls edit help choose version'
+SUBCOMMANDS='scan add ignore delete rm list ls edit theme help choose version'
+
+die()  { printf 'sushi: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'sushi: %s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
 # --------------------------------------------------------------------------- theme --
 #
@@ -42,38 +48,220 @@ SUBCOMMANDS='scan add ignore delete rm list ls edit help choose version'
 #   #ec4899 magenta (body)    #f472b6 rose (the inner swirl)
 #   #14101f nori (base)       #fdf7fb rice (the top)
 #
-# SUSHI_THEME=none leaves every colour to your terminal and FZF_DEFAULT_OPTS.
-# SUSHI_FZF_OPTS is appended to every fzf call, so it wins over all of this.
+# The palette is a YAML file, and SUSHI_THEME says which one:
+#
+#   SUSHI_THEME=none          no colour at all; your terminal and FZF_DEFAULT_OPTS decide
+#   SUSHI_THEME=sushi         the built-in palette below — the default, and reads no file
+#   SUSHI_THEME=nord          themes/nord.yaml, looked up by theme_find below
+#   SUSHI_THEME=~/mine.yaml   that exact file: anything with a / or a .yaml/.yml suffix
+#
+# A theme file names any of the six roles below — accent, heading, prompt,
+# target, value, muted — plus fzf's own colour keys under `fzf:` and the pointer
+# and marker under `symbols:`. Everything it leaves out keeps the built-in
+# value. See themes/sushi.yaml.
+#
+# `sushi theme` prints which one you got and what is in it. SUSHI_FZF_OPTS is
+# appended to every fzf call, so it still wins over all of this.
 : "${SUSHI_THEME:=sushi}"
 : "${SUSHI_FZF_OPTS:=}"
 
-C_CYAN=$'\033[38;2;34;199;232m'
-C_VIOLET=$'\033[38;2;140;111;224m'
-C_PINK=$'\033[38;2;236;72;153m'
-C_ROSE=$'\033[38;2;244;114;182m'
-C_RICE=$'\033[1;38;2;253;247;251m'
-C_DIM=$'\033[38;2;122;110;145m'
-C_OFF=$'\033[0m'
+# The built-in theme, precomputed. themes/sushi.yaml is the same palette as YAML
+# and is what you copy to make your own — the suite asserts the two render
+# identically, so they cannot drift, and the file can be deleted without sushi
+# losing its own colours.
+#
+# It is spelled out here rather than parsed on startup because theme_read costs
+# a few milliseconds and *every* invocation would pay them: the fzf preview
+# forks sushi once per row you move over. Choosing a theme file opts into that
+# cost; the default does not.
+theme_builtin() {
+  THEME_NAME="sushi"
+  C_ACCENT=$'\033[38;2;34;199;232m';    S_ACCENT='#22c7e8'
+  C_HEADING=$'\033[38;2;140;111;224m';  S_HEADING='#8c6fe0'
+  C_PROMPT=$'\033[38;2;236;72;153m';    S_PROMPT='#ec4899'
+  C_TARGET=$'\033[38;2;244;114;182m';   S_TARGET='#f472b6'
+  C_VALUE=$'\033[1;38;2;253;247;251m';  S_VALUE='bold "#fdf7fb"'
+  C_MUTED=$'\033[38;2;122;110;145m';    S_MUTED='#7a6e91'
+  # Only the colour keys every fzf since 0.24 understands: `label` and
+  # `preview-border` look better but make older versions exit with a usage
+  # error. "-1" leaves that part to the terminal, which is why your background
+  # and its transparency show through instead of being painted over.
+  FZF_COLORS='fg:#a99fbd,bg:-1,hl:#22c7e8,fg+:#fdf7fb,bg+:#241a33,hl+:#5ad9f5'
+  FZF_COLORS="$FZF_COLORS,info:#8c6fe0,prompt:#ec4899,pointer:#ec4899"
+  FZF_COLORS="$FZF_COLORS,marker:#22c7e8,border:#5b4a7d,spinner:#8c6fe0"
+  FZF_COLORS="$FZF_COLORS,header:#8c6fe0,gutter:-1"
+  SYM_POINTER='▍'
+  SYM_MARKER='◆'
+}
 
-# Blank the palette when theming is off, so every call site can interpolate the
-# variables unconditionally.
-if [ "$SUSHI_THEME" = none ]; then
-  C_CYAN=""; C_VIOLET=""; C_PINK=""; C_ROSE=""; C_RICE=""; C_DIM=""; C_OFF=""
-fi
+# One theme value -> one SGR sequence, left in $SGR. Empty for none/unset, so
+# every call site can interpolate the palette unconditionally.
+#   bold #fdf7fb -> ESC[1;38;2;253;247;251m       244 -> ESC[38;5;244m
+# The answer goes in a variable rather than on stdout because a command
+# substitution is a fork, and a theme file calls this once per role.
+SGR=""
+theme_sgr() {
+  local tok attrs="" colour="" hex r g b
+  SGR=""
+  for tok in $1; do
+    # `value: bold "#fdf7fb"` has to quote the hex — bare # starts a YAML
+    # comment — so the quotes arrive here rather than being stripped upstream
+    tok="${tok#[\"\']}"; tok="${tok%[\"\']}"
+    case "$tok" in
+      bold)       attrs="${attrs}1;" ;;
+      dim|faint)  attrs="${attrs}2;" ;;
+      italic)     attrs="${attrs}3;" ;;
+      underline)  attrs="${attrs}4;" ;;
+      reverse)    attrs="${attrs}7;" ;;
+      *)          colour="$tok" ;;
+    esac
+  done
+  case "$colour" in
+    ''|none|default|-1)
+      [ -n "$attrs" ] && printf -v SGR '\033[%sm' "${attrs%;}"
+      return 0 ;;
+    '#'*)
+      hex="${colour#\#}"
+      # #abc is the same colour as #aabbcc and shorter to type
+      if [ "${#hex}" = 3 ]; then
+        r="${hex%??}"; g="${hex#?}"; g="${g%?}"; b="${hex#??}"
+        hex="$r$r$g$g$b$b"
+      fi
+      case "${#hex}:$hex" in
+        6:*[!0-9a-fA-F]*|6:) warn "theme: not a colour: $colour"; return 0 ;;
+        6:*) : ;;
+        *) warn "theme: not a colour: $colour"; return 0 ;;
+      esac
+      r=$((16#${hex%????}))
+      g="${hex#??}"; g=$((16#${g%??}))
+      b=$((16#${hex#????}))
+      printf -v SGR '\033[%s38;2;%d;%d;%dm' "$attrs" "$r" "$g" "$b" ;;
+    *[!0-9]*)
+      warn "theme: not a colour: $colour" ;;
+    *)
+      if [ "$colour" -le 255 ]
+        then printf -v SGR '\033[%s38;5;%dm' "$attrs" "$colour"
+        else warn "theme: colour index out of range: $colour"
+      fi ;;
+  esac
+}
 
-# Only the colour keys every fzf since 0.24 understands — `label` and
-# `preview-border` look better but make older versions exit with a usage error.
-FZF_THEME_ARGS=()
+# Set one fzf colour key, replacing any value it already had. A theme file is
+# read on top of the built-in one, so without this an overridden key would be
+# passed to fzf twice — harmless, since the later one wins, but it makes
+# `sushi theme` lie about what is in effect. No forks, and n is fourteen.
+fzf_color_set() {
+  local rest="$FZF_COLORS" item out=""
+  while [ -n "$rest" ]; do
+    item="${rest%%,*}"
+    case "$rest" in *,*) rest="${rest#*,}" ;; *) rest="" ;; esac
+    case "$item" in "$1:"*) continue ;; esac
+    out="${out:+$out,}$item"
+  done
+  FZF_COLORS="${out:+$out,}$1:$2"
+}
+
+# Read a theme from stdin and set the palette from it. A deliberately narrow
+# slice of YAML — comments, `key: value`, and one level of indented keys under
+# `fzf:` and `symbols:` — parsed in bash rather than handed to awk or a yaml
+# tool, because this runs on every invocation including once per row the fzf
+# preview draws, and a fork there is felt. An unknown key is a warning, not a
+# failure: a theme written for a later sushi should still mostly render.
+theme_read() {
+  local line bare key val section="" indented
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    bare="${line#"${line%%[! $'\t']*}"}"          # without the indent
+    case "$bare" in ''|'#'*) continue ;; esac     # blank, or a whole-line comment
+    case "$line" in ' '*|$'\t'*) indented=1 ;; *) indented=0 ;; esac
+    case "$bare" in
+      *:*) key="${bare%%:*}"; val="${bare#*:}" ;;
+      *) warn "theme: cannot parse: $bare"; continue ;;
+    esac
+    key="${key%"${key##*[! $'\t']}"}"
+    val="${val#"${val%%[! $'\t']*}"}"
+    case "$val" in
+      '"'*) val="${val#\"}"; val="${val%%\"*}" ;;
+      "'"*) val="${val#\'}"; val="${val%%\'*}" ;;
+      '#'*) val="" ;;                            # `fzf:  # opens a section` — all comment
+      *)    val="${val%%[ $'\t']#*}"             # a trailing comment
+            val="${val%"${val##*[! $'\t']}"}" ;;
+    esac
+    # A bare `fzf:` with nothing after it opens a section; anything indented
+    # under it belongs to that section, and the next unindented key closes it.
+    if [ "$indented" = 0 ]; then
+      section=""
+      [ -n "$val" ] || { section="$key"; continue; }
+    fi
+    case "$section:$key" in
+      :name)     THEME_NAME="$val" ;;
+      :accent)   theme_sgr "$val"; C_ACCENT="$SGR";  S_ACCENT="$val" ;;
+      :heading)  theme_sgr "$val"; C_HEADING="$SGR"; S_HEADING="$val" ;;
+      :prompt)   theme_sgr "$val"; C_PROMPT="$SGR";  S_PROMPT="$val" ;;
+      :target)   theme_sgr "$val"; C_TARGET="$SGR";  S_TARGET="$val" ;;
+      :value)    theme_sgr "$val"; C_VALUE="$SGR";   S_VALUE="$val" ;;
+      :muted)    theme_sgr "$val"; C_MUTED="$SGR";   S_MUTED="$val" ;;
+      fzf:*)     [ -n "$val" ] && fzf_color_set "$key" "$val" ;;
+      symbols:pointer) SYM_POINTER="$val" ;;
+      symbols:marker)  SYM_MARKER="$val" ;;
+      *) warn "theme: unknown key: ${section:+$section.}$key" ;;
+    esac
+  done
+}
+
+# Where SUSHI_THEME=<name> is looked for, first hit wins:
+#   $SUSHI_THEME_DIR/<name>.yaml        an override for one run or one machine
+#   ~/.config/sushi/themes/<name>.yaml  yours, and survives a `git pull`
+#   <clone>/themes/<name>.yaml          the ones sushi ships
+# XDG_CONFIG_HOME is honoured where it is set.
+theme_find() {
+  local name="$1" dir ext
+  for dir in "${SUSHI_THEME_DIR:-}" \
+             "${XDG_CONFIG_HOME:-$HOME/.config}/sushi/themes" \
+             "$(dirname "$SELF")/themes"; do
+    [ -n "$dir" ] || continue
+    for ext in yaml yml; do
+      [ -f "$dir/$name.$ext" ] && { printf '%s\n' "$dir/$name.$ext"; return 0; }
+    done
+  done
+  return 1
+}
+
+THEME_NAME="none"
+THEME_SOURCE="built-in"
+THEME_FILE=""
+C_ACCENT=""; C_HEADING=""; C_PROMPT=""; C_TARGET=""; C_VALUE=""; C_MUTED=""; C_OFF=""
+# The spec each colour came from, kept only so `sushi theme` can show you what
+# it read rather than what it computed.
+S_ACCENT=""; S_HEADING=""; S_PROMPT=""; S_TARGET=""; S_VALUE=""; S_MUTED=""
+FZF_COLORS=""
+SYM_POINTER=""
+SYM_MARKER=""
+
+# SUSHI_THEME=none skips all of it: the palette stays blank, which every call
+# site interpolates harmlessly, and fzf is passed no --color at all.
 if [ "$SUSHI_THEME" != none ]; then
-  FZF_THEME_ARGS=(
-    --color='fg:#a99fbd,bg:-1,hl:#22c7e8'
-    --color='fg+:#fdf7fb,bg+:#241a33,hl+:#5ad9f5'
-    --color='info:#8c6fe0,prompt:#ec4899,pointer:#ec4899'
-    --color='marker:#22c7e8,spinner:#8c6fe0,header:#8c6fe0'
-    --color='border:#5b4a7d,gutter:-1'
-    --pointer='▍'
-    --marker='◆'
-  )
+  case "$SUSHI_THEME" in
+    sushi)             THEME_FILE="" ;;
+    */*|*.yaml|*.yml)  THEME_FILE="${SUSHI_THEME/#\~/$HOME}" ;;
+    *)                 THEME_FILE="$(theme_find "$SUSHI_THEME")" || {
+                         warn "no theme named $SUSHI_THEME — using the built-in one"
+                         THEME_FILE=""
+                       } ;;
+  esac
+  if [ -n "$THEME_FILE" ] && [ ! -r "$THEME_FILE" ]; then
+    warn "cannot read theme $THEME_FILE — using the built-in one"
+    THEME_FILE=""
+  fi
+  # The built-in palette always goes down first and a file is read on top of
+  # it, so a theme can be the two lines you actually wanted to change and still
+  # leave the rest of the picker looking like something.
+  theme_builtin
+  if [ -n "$THEME_FILE" ]; then
+    THEME_SOURCE="$THEME_FILE"
+    theme_read < "$THEME_FILE"
+  fi
+  C_OFF=$'\033[0m'
 fi
 
 # Full screen, not a slice of the current one.
@@ -96,6 +284,11 @@ fi
 # that wants something else can say so, and SUSHI_FZF_OPTS='--height=80%' still
 # buys the inline picker back for anyone who prefers it and does not resize.
 FZF_WINDOW_ARGS=(--height=100%)
+
+FZF_THEME_ARGS=()
+[ -n "$FZF_COLORS" ]  && FZF_THEME_ARGS+=(--color="$FZF_COLORS")
+[ -n "$SYM_POINTER" ] && FZF_THEME_ARGS+=(--pointer="$SYM_POINTER")
+[ -n "$SYM_MARKER" ]  && FZF_THEME_ARGS+=(--marker="$SYM_MARKER")
 
 FZF_USER_ARGS=()
 if [ -n "$SUSHI_FZF_OPTS" ]; then
@@ -132,10 +325,6 @@ FZF() {
 # is set per-call rather than for the whole script on purpose — fzf draws the
 # picker with box-drawing characters, and LC_ALL=C would turn those into noise.
 AWK() { LC_ALL=C awk "$@"; }
-
-die()  { printf 'sushi: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'sushi: %s\n' "$*" >&2; }
-have() { command -v "$1" >/dev/null 2>&1; }
 
 # -------------------------------------------------------------------- clock --
 #
@@ -1135,13 +1324,13 @@ menu_from_candidates() {
     if [ "$count" = "0" ]; then
       target="$host${port:+:$port}"
       printf '%s%11s%s  %s%s%s%s%s%s\t%s\t%s\n' \
-        "$C_VIOLET" 'known_hosts' "$C_OFF" "$C_RICE" "$target" "$C_OFF" \
-        "$C_CYAN" "$extra" "$C_OFF" "$line" "$host"
+        "$C_HEADING" 'known_hosts' "$C_OFF" "$C_VALUE" "$target" "$C_OFF" \
+        "$C_ACCENT" "$extra" "$C_OFF" "$line" "$host"
     else
       target="${user:+$user@}$host${port:+:$port}"
       printf '%s%10sx%s  %s%s%s%s%s%s\t%s\t%s\n' \
-        "$C_DIM" "$count" "$C_OFF" "$C_RICE" "$target" "$C_OFF" \
-        "$C_CYAN" "$extra" "$C_OFF" "$line" "${user:+$user@}$host"
+        "$C_MUTED" "$count" "$C_OFF" "$C_VALUE" "$target" "$C_OFF" \
+        "$C_ACCENT" "$extra" "$C_OFF" "$line" "${user:+$user@}$host"
     fi
   done
 }
@@ -1403,7 +1592,7 @@ ignore_rows() {
     is_ignored "$user" "$host" && continue
     target="${user:+$user@}$host"
     printf '%s%-9s%s %s%-42s%s %s\n' \
-      "$C_CYAN" 'scan' "$C_OFF" "$C_RICE" "$target" "$C_OFF" "$target"
+      "$C_ACCENT" 'scan' "$C_OFF" "$C_VALUE" "$target" "$C_OFF" "$target"
   done < <(scan_candidates)
 
   {
@@ -1411,7 +1600,7 @@ ignore_rows() {
     printf '%s\n' '@@SUSHI_ALIASES@@'
     managed_block | AWK '{ l = $0; sub(/^[ \t]+/, "", l)
       if (tolower(l) ~ /^host[ \t]/) { for (i = 2; i <= NF; i++) print $i } }'
-  } | AWK -v pink="$C_PINK" -v rice="$C_RICE" -v off="$C_OFF" '
+  } | AWK -v pink="$C_PROMPT" -v rice="$C_VALUE" -v off="$C_OFF" '
       BEGIN { FS = "\t"; mode = 0 }
       $0 == "@@SUSHI_ALIASES@@" { mode = 1; next }
       mode == 0 {
@@ -1583,7 +1772,7 @@ cmd_list() {
   rows="$(config_hosts)"
   [ -n "$rows" ] || { printf 'No hosts in %s yet — run: sushi scan\n' "$CONFIG"; return 0; }
   # Colour only when a human is looking; piped or captured output stays plain.
-  if [ -t 1 ]; then h="$C_VIOLET"; a="$C_RICE"; t="$C_DIM"; z="$C_OFF"
+  if [ -t 1 ]; then h="$C_HEADING"; a="$C_VALUE"; t="$C_MUTED"; z="$C_OFF"
   else h=""; a=""; t=""; z=""; fi
   printf '%s\n' "$rows" | sort -f \
     | AWK -F'\t' -v h="$h" -v a="$a" -v t="$t" -v z="$z" '
@@ -1604,24 +1793,24 @@ cmd_preview() {
   clock_now
   facts="$(host_facts)"
 
-  printf '%s\n' "$facts" | AWK -F'\t' -v a="$a" -v c="$C_ROSE" -v z="$C_OFF" '$1 == a {
+  printf '%s\n' "$facts" | AWK -F'\t' -v a="$a" -v c="$C_TARGET" -v z="$C_OFF" '$1 == a {
     printf "  %s%s%s%s%s\n", c, ($3 != "" ? $3 "@" : ""), $2, ($4 != "22" ? ":" $4 : ""), z
   }'
 
   if have ssh; then
-    printf '\n  %sresolved%s\n' "$C_VIOLET" "$C_OFF"
+    printf '\n  %sresolved%s\n' "$C_HEADING" "$C_OFF"
     ssh -F "$CONFIG" -G "$a" 2>/dev/null | while read -r key val; do
       case "$key" in
         hostname|user|port|proxyjump|proxycommand|forwardagent|localforward|remoteforward)
           [ "$val" = "none" ] && continue
           [ "$key" = "forwardagent" ] && [ "$val" = "no" ] && continue
-          printf '    %s%-14s%s %s%s%s\n' "$C_DIM" "$key" "$C_OFF" "$C_RICE" "$val" "$C_OFF"
+          printf '    %s%-14s%s %s%s%s\n' "$C_MUTED" "$key" "$C_OFF" "$C_VALUE" "$val" "$C_OFF"
           ;;
         identityfile)
           # only keys that actually exist, so the seven ssh defaults stay hidden
           # shellcheck disable=SC2088  # matching a literal ~ in ssh -G output
           case "$val" in "~/"*) [ -f "$HOME/${val#\~/}" ] || continue ;; *) [ -f "$val" ] || continue ;; esac
-          printf '    %s%-14s%s %s%s%s\n' "$C_DIM" "$key" "$C_OFF" "$C_CYAN" "$val" "$C_OFF"
+          printf '    %s%-14s%s %s%s%s\n' "$C_MUTED" "$key" "$C_OFF" "$C_ACCENT" "$val" "$C_OFF"
           ;;
       esac
     done
@@ -1631,8 +1820,8 @@ cmd_preview() {
   # only as good as the dates your shell keeps, and both say so rather than
   # guessing: "never" means the history has no such host at all, "unknown" means
   # it has one but no date to go with it.
-  printf '%s\n' "$facts" | AWK -F'\t' -v a="$a" -v d="$C_DIM" -v r="$C_RICE" \
-      -v v="$C_VIOLET" -v z="$C_OFF" -v now="$NOW" -v tzoff="$TZOFF" "$AWK_TIME"'
+  printf '%s\n' "$facts" | AWK -F'\t' -v a="$a" -v d="$C_MUTED" -v r="$C_VALUE" \
+      -v v="$C_HEADING" -v z="$C_OFF" -v now="$NOW" -v tzoff="$TZOFF" "$AWK_TIME"'
       $1 == a {
         ad = iso2epoch($5)
         printf "\n  %susage%s\n", v, z
@@ -1645,8 +1834,8 @@ cmd_preview() {
   local disp="$CONFIG"
   # shellcheck disable=SC2088  # a literal ~ is what we want to display
   case "$disp" in "$HOME"/*) disp="~/${disp#"$HOME"/}" ;; esac
-  printf '\n  %sstanza in %s%s\n' "$C_VIOLET" "$disp" "$C_OFF"
-  flatten_config "$CONFIG" 2>/dev/null | AWK -v a="$a" -v d="$C_DIM" -v z="$C_OFF" '
+  printf '\n  %sstanza in %s%s\n' "$C_HEADING" "$disp" "$C_OFF"
+  flatten_config "$CONFIG" 2>/dev/null | AWK -v a="$a" -v d="$C_MUTED" -v z="$C_OFF" '
     { k = tolower($1) }
     k == "host" { inb = 0; for (i = 2; i <= NF; i++) if ($i == a) inb = 1; if (inb) { print "    " d $0 z }; next }
     k == "match" { inb = 0; next }
@@ -1843,7 +2032,7 @@ picker_lines() {
     key=("-k1,1n" "-k2,2nr" "-k3,3f")
   fi
 
-  host_facts | AWK -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v v="$C_VIOLET" -v z="$C_OFF" \
+  host_facts | AWK -F'\t' -v a="$C_VALUE" -v t="$C_MUTED" -v v="$C_HEADING" -v z="$C_OFF" \
       -v aw="$aw" -v now="$NOW" -v tzoff="$TZOFF" -v mode="$mode" "$AWK_TIME"'
       {
         tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
@@ -1999,6 +2188,44 @@ cmd_pick() {
   exec ssh "$rec"
 }
 
+# Which theme you got, where it came from, and what is in it — the answer to
+# "I edited a yaml file and nothing changed", which is nearly always that the
+# file is somewhere theme_find does not look, or that SUSHI_THEME still says
+# something else.
+cmd_theme() {
+  local dir
+  printf '%s%s%s\n' "$C_VALUE" "${THEME_NAME:-none}" "$C_OFF"
+  printf '  %s%-9s%s %s\n' "$C_MUTED" 'source' "$C_OFF" "$THEME_SOURCE"
+  [ "$THEME_SOURCE" = built-in ] || printf '  %s%-9s%s %s\n' \
+      "$C_MUTED" '' "$C_OFF" 'read on top of the built-in theme, which fills in whatever it omits'
+  if [ "$SUSHI_THEME" = none ]; then
+    printf '  %sSUSHI_THEME=none — every colour is left to your terminal%s\n' \
+        "$C_MUTED" "$C_OFF"
+    return 0
+  fi
+  printf '\n  %sroles%s\n' "$C_HEADING" "$C_OFF"
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" accent  "$C_OFF" "$C_ACCENT"  "$S_ACCENT"  "$C_OFF" 'match highlights, markers, key paths'
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" heading "$C_OFF" "$C_HEADING" "$S_HEADING" "$C_OFF" 'headers and section labels'
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" prompt  "$C_OFF" "$C_PROMPT"  "$S_PROMPT"  "$C_OFF" 'the `imported` tag'
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" target  "$C_OFF" "$C_TARGET"  "$S_TARGET"  "$C_OFF" 'the resolved target in the preview'
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" value   "$C_OFF" "$C_VALUE"   "$S_VALUE"   "$C_OFF" 'aliases and values'
+  printf '    %s%-9s%s %s%-18s%s %s\n' "$C_MUTED" muted   "$C_OFF" "$C_MUTED"   "$S_MUTED"   "$C_OFF" 'ages, keys, everything secondary'
+  printf '\n  %sfzf%s\n' "$C_HEADING" "$C_OFF"
+  printf '%s\n' "$FZF_COLORS" | tr ',' '\n' | while IFS=: read -r k v; do
+    [ -n "$k" ] || continue
+    printf '    %s%-9s%s %s\n' "$C_MUTED" "$k" "$C_OFF" "$v"
+  done
+  printf '    %s%-9s%s %s   %s%-9s%s %s\n' \
+      "$C_MUTED" pointer "$C_OFF" "$SYM_POINTER" "$C_MUTED" marker "$C_OFF" "$SYM_MARKER"
+  printf '\n  %ssearched%s\n' "$C_HEADING" "$C_OFF"
+  for dir in "${SUSHI_THEME_DIR:-}" \
+             "${XDG_CONFIG_HOME:-$HOME/.config}/sushi/themes" \
+             "$(dirname "$SELF")/themes"; do
+    [ -n "$dir" ] || continue
+    printf '    %s%s%s\n' "$C_MUTED" "$dir" "$C_OFF"
+  done
+}
+
 usage() {
   # The header block, however long it grows — a hardcoded line range goes stale
   # the first time someone documents a new subcommand.
@@ -2046,6 +2273,7 @@ $a"; done
   __pend)            shift; pend_add "$@" ;;     # internal: note a ctrl-x dismissal
   __candidates)      scan_history ;;             # internal: raw history scan
   __extract)         extract_stream ;;          # internal: history lines -> records
+  theme)             cmd_theme ;;
   edit)              exec "${EDITOR:-vi}" "$CONFIG" ;;
   help|-h|--help)    usage ;;
   version|--version|-V) cmd_version ;;
