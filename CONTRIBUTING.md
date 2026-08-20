@@ -182,7 +182,9 @@ admitting the gap.
 
 ## Debugging
 
-Three hidden subcommands dump intermediate state:
+`sushi doctor` is the first thing to run when something is off — binaries, `~/.ssh` permissions
+and parse, whether `sushi.zsh` is sourced, the active theme. Hidden subcommands dump intermediate
+state:
 
 ```bash
 sushi __candidates       # raw history scan:  count|user|host|port|key|jump|last

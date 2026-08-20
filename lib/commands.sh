@@ -1155,6 +1155,184 @@ EOF
       "$C_ACCENT" "$C_OFF" "$C_ACCENT" "$C_OFF"
 }
 
+# sushi doctor — what is and is not ready. Missing fzf is a warning (scan/list
+# still work). An unreadable or unparseable ~/.ssh/config is a failure: that is
+# the write path's one job, and sushi will refuse to touch it.
+cmd_doctor() {
+  case "${1:-}" in
+    -h|--help)
+      printf '%s\n' "sushi doctor — binaries, ~/.ssh, the integration, the theme"
+      return 0 ;;
+  esac
+
+  local fail=0 okc="" warnc="" failc="" off=""
+  if [ -t 1 ]; then
+    okc="$C_ACCENT"; warnc="$C_PROMPT"; failc="$C_PROMPT"; off="$C_OFF"
+  fi
+
+  # $1 ok|warn|fail  $2 label  $3 detail
+  tag() {
+    local c=""
+    case "$1" in
+      ok)   c="$okc" ;;
+      warn) c="$warnc" ;;
+      fail) c="$failc"; fail=$((fail + 1)) ;;
+    esac
+    printf '  %s%-4s%s  %-12s %s\n' "$c" "$1" "$off" "$2" "$3"
+  }
+
+  # BSD stat -f %Lp vs GNU stat -c %a. Either may print a leading 0.
+  doc_mode() {
+    local m
+    case "$(uname -s)" in
+      Darwin) m="$(stat -f %Lp "$1" 2>/dev/null)" ;;
+      *)      m="$(stat -c %a "$1" 2>/dev/null)" ;;
+    esac
+    case "$m" in 0[0-9][0-9][0-9]) m="${m#0}" ;; esac
+    printf '%s' "$m"
+  }
+
+  cmd_version
+  printf '\n'
+
+  if have ssh; then
+    tag ok ssh "$(ssh -V 2>&1 | head -1)"
+  else
+    tag fail ssh "not found"
+  fi
+
+  if have awk; then
+    tag ok awk "$(command -v awk)"
+  else
+    tag fail awk "not found"
+  fi
+
+  if have fzf; then
+    local fv
+    fv="$(fzf --version 2>/dev/null)"
+    fv="${fv%% *}"
+    tag ok fzf "$fv ($(fzf_reload_action))"
+  else
+    tag warn fzf "not found — picker needs it. $(fzf_install_cmd)"
+  fi
+
+  if [ -d "$SSH_DIR" ]; then
+    local sm
+    sm="$(doc_mode "$SSH_DIR")"
+    if [ "$sm" = 700 ]; then
+      tag ok sshdir "$(tilde "$SSH_DIR")  $sm"
+    elif [ -n "$sm" ]; then
+      tag warn sshdir "$(tilde "$SSH_DIR")  $sm (want 700)"
+    else
+      tag ok sshdir "$(tilde "$SSH_DIR")"
+    fi
+  else
+    tag warn sshdir "missing — sushi scan will create $(tilde "$SSH_DIR")"
+  fi
+
+  if [ ! -e "$CONFIG" ]; then
+    tag warn config "none yet — sushi scan"
+  elif [ ! -r "$CONFIG" ]; then
+    tag fail config "cannot read $(tilde "$CONFIG")"
+  else
+    local cm nh parsed=0 parse="" detail
+    cm="$(doc_mode "$CONFIG")"
+    nh="$(config_hosts | AWK 'END { print NR }')"
+    if have ssh; then
+      parsed=1
+      if ssh -F "$CONFIG" -G sushi-probe.invalid >/dev/null 2>&1; then
+        parse="parses"
+      else
+        tag fail config "ssh cannot parse $(tilde "$CONFIG")"
+      fi
+    fi
+    # a parse failure already tagged the file; don't also call it ok
+    if [ "$parsed" = 1 ] && [ -z "$parse" ]; then
+      :
+    else
+      detail="$nh hosts"
+      [ "$nh" = 1 ] && detail="1 host"
+      [ -n "$cm" ] && detail="$detail, $cm"
+      [ -n "$parse" ] && detail="$detail, $parse"
+      if [ "$nh" = 0 ]; then
+        tag warn config "$detail — sushi scan"
+      else
+        tag ok config "$detail"
+      fi
+    fi
+  fi
+
+  local hf=0 hlist="" sess=0 f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      */.zsh_sessions/*.history) sess=$((sess + 1)) ;;
+      *) hf=$((hf + 1)); hlist="${hlist:+$hlist, }$(tilde "$f")" ;;
+    esac
+  done < <(history_files)
+  if [ "$hf" -eq 0 ] && [ "$sess" -eq 0 ]; then
+    tag warn history "none — scan will be empty"
+  else
+    [ "$sess" -gt 0 ] && hlist="${hlist:+$hlist, }$sess session files"
+    tag ok history "$hlist"
+  fi
+
+  if [ "${SUSHI_THEME:-sushi}" = none ]; then
+    tag ok theme "none  (terminal colours)"
+  else
+    local tsrc="$THEME_SOURCE"
+    [ "$tsrc" = built-in ] || tsrc="$(tilde "$tsrc")"
+    tag ok theme "${THEME_NAME:-none}  ($tsrc)"
+  fi
+
+  local rc="${SUSHI_RC:-${ZDOTDIR:-$HOME}/.zshrc}"
+  local mode="${SUSHI_MODE:-}"
+  if [ -z "$mode" ] && [ -r "$rc" ]; then
+    mode="$(AWK '/SUSHI_MODE:=/ {
+      s = $0; sub(/.*SUSHI_MODE:=/, "", s); sub(/\}.*/, "", s); print s; exit
+    }' "$rc")"
+  fi
+  [ -n "$mode" ] || mode="key,enter"
+  if [ -r "$rc" ] && grep -q 'sushi.zsh' "$rc"; then
+    tag ok integration "$mode  $(tilde "$rc")"
+    case ",$mode," in
+      *,wrap,*)
+        if [ "${TERM_PROGRAM:-}" = WarpTerminal ] || [ -n "${FIG_TERM:-}" ]; then
+          tag warn wrap "shadows ssh, so Warp/Fig completion is off — use enter"
+        fi
+        ;;
+    esac
+  else
+    tag warn integration "not sourced in $(tilde "$rc") — ./install.sh"
+  fi
+
+  case "${SHELL:-}" in
+    *zsh) ;;
+    *) tag warn shell "${SHELL:-unknown}, not zsh — integration is zsh-only; the sushi command still works" ;;
+  esac
+
+  # Only interesting when a *different* sushi wins on PATH (gnome-sushi).
+  # Not on PATH at all is the normal clone-and-source install.
+  local onpath resolved
+  onpath="$(command -v sushi 2>/dev/null || true)"
+  if [ -n "$onpath" ]; then
+    resolved="$(cd "$(dirname "$onpath")" 2>/dev/null && pwd)/$(basename "$onpath")"
+    if [ "$resolved" != "$SELF" ]; then
+      tag warn PATH "$(tilde "$onpath") is a different sushi than $(tilde "$SELF")"
+    else
+      tag ok PATH "$(tilde "$SELF")"
+    fi
+  fi
+
+  printf '\n'
+  if [ "$fail" -gt 0 ]; then
+    printf '%s%d fail%s\n' "$failc" "$fail" "$off"
+    return 1
+  fi
+  printf '%sok%s\n' "$okc" "$off"
+  return 0
+}
+
 usage() {
   # The header block, however long it grows — a hardcoded line range goes stale
   # the first time someone documents a new subcommand.
