@@ -3,7 +3,9 @@
 </p>
 
 <p align="center">
-  <img src="../../actions/workflows/test.yml/badge.svg" alt="tests">
+  <a href="https://github.com/infuriating/sushi/actions/workflows/test.yml">
+    <img src="https://github.com/infuriating/sushi/actions/workflows/test.yml/badge.svg" alt="tests">
+  </a>
 </p>
 
 *ssh + ui, rearranged.* A fuzzy picker for your SSH hosts that builds itself from your shell
@@ -208,7 +210,7 @@ The rest of the surface:
 ```bash
 sushi theme         # what you are running, where it came from, and what is in it
 sushi theme list    # every theme found, grouped by directory so precedence is visible
-SUSHI_THEME=ansi ssh   # try one without keeping it
+SUSHI_THEME=ansi sushi   # try one without keeping it
 ```
 
 To write your own, copy the shipped one and edit it — `~/.config/sushi/themes` is searched before

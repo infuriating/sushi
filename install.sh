@@ -24,6 +24,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
 BEGIN="# >>> sushi >>>"
 END="# <<< sushi <<<"
+# Distinct from BEGIN/END: `sushi theme set` writes this *above* the install
+# block, because we rewrite everything between BEGIN/END on every run.
+THEME_BEGIN="# >>> sushi theme >>>"
+THEME_END="# <<< sushi theme <<<"
 
 MODE=""
 KEY='^S'
@@ -51,9 +55,15 @@ strip_block() {
 }
 
 if [ "$ACTION" = "uninstall" ]; then
-  if [ -f "$ZSHRC" ] && grep -Fq "$BEGIN" "$ZSHRC"; then
+  if [ -f "$ZSHRC" ] && { grep -Fq "$BEGIN" "$ZSHRC" || grep -Fq "$THEME_BEGIN" "$ZSHRC"; }; then
     cp "$ZSHRC" "$ZSHRC.sushi-backup"
-    strip_block > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
+    # strip_block is install-markers only — re-using it here would leave
+    # `theme set`'s block behind, and the CI check (`no 'sushi' in the rc`)
+    # would then be lying.
+    awk -v b="$BEGIN" -v e="$END" -v tb="$THEME_BEGIN" -v te="$THEME_END" '
+      index($0, b) || index($0, tb) { f = 1; next }
+      index($0, e) || index($0, te) { f = 0; next }
+      !f' "$ZSHRC" > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
     info "removed the sushi block from $ZSHRC (backup: $ZSHRC.sushi-backup)"
     info "open a new shell to pick that up"
   else

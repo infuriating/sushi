@@ -943,16 +943,18 @@ cmd_pick() {
 # rather than something you have to know: the first `ansi.yaml` down the list is
 # the one you get, and any later one is marked shadowed.
 cmd_themes() {
-  local dir ext f name seen=" " shadow=""
+  local dir ext f name seen=" " shadow="" n
   while IFS= read -r dir; do
-    [ -d "$dir" ] || continue
-    set -- "$dir"/*.yaml "$dir"/*.yml
-    # a glob that matched nothing comes back as itself, so an empty dir prints
-    # a heading and nothing else — which is still worth showing, since "your
-    # themes go here" is half the question
+    [ -n "$dir" ] || continue
+    # List the dir even when it does not exist yet: `sushi themes` is how you
+    # find out where to put a file, and ~/.config/sushi/themes is the answer.
+    # A glob that matched nothing comes back as itself; skip those below.
     printf '%s%s%s\n' "$C_HEADING" "$(tilde "$dir")" "$C_OFF"
+    n=0
+    set -- "$dir"/*.yaml "$dir"/*.yml
     for f in "$@"; do
       [ -f "$f" ] || continue
+      n=$((n + 1))
       name="${f##*/}"; for ext in .yaml .yml; do name="${name%$ext}"; done
       case "$seen" in
         *" $name "*) shadow=" $(tilde "$(theme_find "$name")")" ;;
@@ -969,12 +971,15 @@ cmd_themes() {
         printf '    %s%s%s\n' "$C_VALUE" "$name" "$C_OFF"
       fi
     done
+    [ "$n" -eq 0 ] && printf '    %s(empty)%s\n' "$C_MUTED" "$C_OFF"
   done <<EOF
 $(theme_dirs)
 EOF
-  printf '\n  %ssushi theme set%s to pick one and keep it, %sSUSHI_THEME=<name> ssh%s to\n' \
-      "$C_ACCENT" "$C_OFF" "$C_ACCENT" "$C_OFF"
-  printf '  try one without keeping it.\n'
+  # `SUSHI_THEME=… ssh` only themes the picker in wrap mode. Default is
+  # key,enter, where ssh is the real binary and the env var is ignored.
+  printf '\n  %ssushi theme set%s to pick one and keep it\n' "$C_ACCENT" "$C_OFF"
+  printf '  %sSUSHI_THEME=<name> sushi%s to try one without keeping it\n' \
+      "$C_ACCENT" "$C_OFF"
 }
 
 # `sushi theme set` with no name: choose one by looking at it. The preview pane

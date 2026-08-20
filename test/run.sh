@@ -1744,7 +1744,13 @@ out="$(HOME="$H" SUSHI_THEME_DIR="$TH" "$SUSHI" themes 2>&1 | sed "s/${esc}\[[0-
 assert_has "a shadowed duplicate says so"      "shadowed by" "$out"
 assert_eq  "and the name is still offered once" "1" \
            "$(HOME="$H" SUSHI_THEME_DIR="$TH" "$SUSHI" __themes | grep -c '^only$' | tr -d ' ')"
-rm -f "$H/.config/sushi/themes/only.yaml"
+rm -rf "$H/.config/sushi/themes"
+out="$(HOME="$H" "$SUSHI" themes 2>&1 | sed "s/${esc}\[[0-9;]*m//g")"
+assert_has "the user theme dir is listed even when missing" ".config/sushi/themes" "$out"
+assert_has "and marked empty, so you know to put a file there" "(empty)" "$out"
+assert_has "try-without-keeping it uses sushi, not ssh" "SUSHI_THEME=<name> sushi" "$out"
+assert_lacks "because SUSHI_THEME=… ssh is a no-op in key,enter mode" \
+             "SUSHI_THEME=<name> ssh" "$out"
 
 # --------------------------------------------------------------------------
 # `sushi theme set`
@@ -1778,6 +1784,10 @@ HOME="$IH2" "$ROOT/install.sh" >/dev/null 2>&1
 assert_has "install.sh leaves the theme line alone" "export SUSHI_THEME=ansi" "$(cat "$IH2/.zshrc")"
 assert_eq  "and there is still exactly one of it" "1" \
            "$(grep -c 'export SUSHI_THEME=' "$IH2/.zshrc" | tr -d ' ')"
+HOME="$IH2" "$ROOT/install.sh" --uninstall >/dev/null 2>&1
+assert_lacks "uninstall removes the theme block too" "SUSHI_THEME" "$(cat "$IH2/.zshrc")"
+assert_lacks "and every other sushi marker" "sushi" "$(cat "$IH2/.zshrc")"
+assert_has   "without taking the rest of the file" "export KEEP=1" "$(cat "$IH2/.zshrc")"
 
 # idempotent, like every other write in this project
 rcset ansi >/dev/null; rcset only >/dev/null
