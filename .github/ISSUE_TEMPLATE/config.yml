@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/infuriating/sushi/blob/main/CONTRIBUTING.md
+    about: Portability rules, test expectations, and how the project stays small.
+  - name: Security report
+    url: https://github.com/infuriating/sushi/security/advisories/new
+    about: Privately report a vulnerability — do not open a public issue.

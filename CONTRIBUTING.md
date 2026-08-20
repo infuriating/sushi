@@ -3,6 +3,11 @@
 Bug reports and patches welcome. The project is deliberately small: `sushi` + `lib/*.sh` +
 `sushi.zsh`, no dependencies beyond fzf, no build step.
 
+Use the [bug](https://github.com/infuriating/sushi/issues/new?template=bug_report.yml) or
+[feature](https://github.com/infuriating/sushi/issues/new?template=feature_request.yml) issue forms.
+Security-sensitive write-path bugs go through [SECURITY.md](./.github/SECURITY.md), not a public
+issue. PRs pick up `.github/PULL_REQUEST_TEMPLATE.md` automatically.
+
 ## Before opening a PR
 
 ```bash
