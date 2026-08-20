@@ -1,0 +1,32 @@
+# The same layout in terminal palette indexes instead of hex, for terminals
+# without truecolour and for anyone who wants sushi to follow the colour scheme
+# they already have. 0-15 are your terminal's own sixteen, so this theme changes
+# with your terminal theme rather than fighting it.
+name: ansi
+
+accent:  6                  # match highlights, markers, key paths
+heading: 5                  # headers and section labels
+prompt:  13                 # the `imported` tag
+target:  13                 # the resolved target in the preview
+value:   bold 15            # aliases and values
+muted:   8                  # ages, keys, everything secondary
+
+fzf:
+  fg: 7
+  bg: "-1"
+  hl: 6
+  fg+: 15
+  bg+: 8
+  hl+: 14
+  info: 5
+  prompt: 13
+  pointer: 13
+  marker: 6
+  border: 8
+  spinner: 5
+  header: 5
+  gutter: "-1"
+
+symbols:
+  pointer: "▍"
+  marker: "◆"
