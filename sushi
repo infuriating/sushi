@@ -1729,13 +1729,74 @@ alias_width() {
     END { print (m < 12 ? 12 : (m > 32 ? 32 : m)) }'
 }
 
+# ---------------------------------------------------------------------- sort --
+#
+# Three orderings, cycled with ctrl-s inside the picker:
+#
+#   used    most recently used first   (the default)
+#   added   most recently added first
+#   count   most used first
+#
+# `used` leads because recency is the better predictor: the host you touched an
+# hour ago is almost always the one you want next, while a lifetime count keeps
+# the server you hammered for a week last spring pinned to the top forever.
+# `count` is still one keypress away, and SUSHI_SORT picks the mode you start in
+# (`alpha` for plain A-Z, which is outside the cycle — ctrl-s leaves it).
+sort_mode_norm() {
+  case "${1:-}" in
+    added)       printf 'added' ;;
+    count|usage) printf 'count' ;;   # `usage` is what SUSHI_SORT called it once
+    alpha)       printf 'alpha' ;;
+    *)           printf 'used' ;;
+  esac
+}
+
+# What the header calls the current mode.
+sort_mode_label() {
+  case "$1" in
+    added) printf 'last added' ;;
+    count) printf 'most used' ;;
+    alpha) printf 'A-Z' ;;
+    *)     printf 'last used' ;;
+  esac
+}
+
+# The mode lives in a file, not a variable: ctrl-s reloads the list by running
+# this script again as a child of fzf, and a child cannot hand a variable back.
+# Trap-visible for the same reason SCAN_CACHE is — see cleanup_scan.
+SORT_STATE=""
+cleanup_sort() {
+  [ -n "$SORT_STATE" ] && rm -f "$SORT_STATE"
+  return 0
+}
+
+sort_mode_read() {
+  local m=""
+  [ -n "${SUSHI_SORT_STATE:-}" ] && [ -r "${SUSHI_SORT_STATE:-}" ] &&
+    IFS= read -r m < "$SUSHI_SORT_STATE"
+  [ -n "$m" ] || m="${SUSHI_SORT:-used}"
+  sort_mode_norm "$m"
+}
+
+# ctrl-s: step to the next mode and remember it for the reload that follows.
+sort_mode_advance() {
+  local next
+  case "$(sort_mode_read)" in
+    used)  next=added ;;
+    added) next=count ;;
+    *)     next=used ;;    # count, and alpha, which joins the cycle here
+  esac
+  [ -n "${SUSHI_SORT_STATE:-}" ] || return 0
+  printf '%s\n' "$next" > "$SUSHI_SORT_STATE" 2>/dev/null
+  return 0
+}
+
 # "alias   added   used   user@host:port <TAB> alias" — column 1 is shown,
 # column 2 is the payload.
 #
-# Ordered by how often you actually reach each host, not alphabetically: the
-# counts already come out of the history scan, and `bastion` being first because
-# it starts with b is not useful. Hosts with no history fall to the bottom,
-# alphabetically among themselves. SUSHI_SORT=alpha restores plain A-Z.
+# Ordered by the current sort mode, never alphabetically by accident: `bastion`
+# being first because it starts with b is not useful. Rows the mode has no date
+# or count for fall to the bottom, alphabetically among themselves.
 #
 # The ages sit between the alias and the target rather than after it: the target
 # is the one column here worth fuzzy-matching, so it is never padded and never
@@ -1743,29 +1804,60 @@ alias_width() {
 # to its right out of line.
 #
 # $1 = the alias column width, if the caller already worked it out.
+# $2 = the sort mode, if the caller already read it.
 picker_lines() {
   clock_now
-  local aw="${1:-}"
+  local aw="${1:-}" mode
   [ -n "$aw" ] || aw="$(alias_width)"
+  mode="$(sort_mode_norm "${2:-$(sort_mode_read)}")"
   local -a key
-  if [ "${SUSHI_SORT:-usage}" = alpha ]; then
+  if [ "$mode" = alpha ]; then
     key=("-k3,3f")
   else
-    # used-or-not, then count descending, then name — so your daily hosts lead
-    # and the cold ones trail in A-Z
+    # have-a-key-or-not, then the key descending, then name — so your live hosts
+    # lead and the cold ones trail in A-Z
     key=("-k1,1n" "-k2,2nr" "-k3,3f")
   fi
 
   host_facts | AWK -F'\t' -v a="$C_RICE" -v t="$C_DIM" -v v="$C_VIOLET" -v z="$C_OFF" \
-      -v aw="$aw" -v now="$NOW" -v tzoff="$TZOFF" "$AWK_TIME"'
+      -v aw="$aw" -v now="$NOW" -v tzoff="$TZOFF" -v mode="$mode" "$AWK_TIME"'
       {
         tgt = ($3 != "" ? $3 "@" : "") $2 ($4 != "22" ? ":" $4 : "")
+        added = iso2epoch($5)
+        if      (mode == "added") k = added + 0
+        else if (mode == "count") k = $6 + 0
+        else                      k = $7 + 0
         # the first three columns are sort keys, stripped again below
         printf "%d\t%d\t%s\t%s%-*s%s  %s%5s  %5s%s  %s%s%s\t%s\n", \
-          ($6 > 0 ? 0 : 1), $6, $1, \
-          a, aw, $1, z, v, ago(iso2epoch($5)), ago($7), z, t, tgt, z, $1
+          (k > 0 ? 0 : 1), k, $1, \
+          a, aw, $1, z, v, ago(added), ago($7), z, t, tgt, z, $1
       }
     ' | sort -t"$TAB" "${key[@]}" | cut -f4-
+}
+
+# The two lines fzf pins above the list.
+#
+# They travel down the same pipe as the rows (--header-lines=2) rather than
+# through --header, because ctrl-s has to redraw the mode it just changed, and
+# a --header string is fixed for the life of the process while reload replaces
+# the input wholesale. Header lines are not matchable or selectable, so nothing
+# else about the picker changes.
+picker_header() {
+  local aw="$1" mode="$2"
+  printf 'ENTER connect · ctrl-s sort: %s · ctrl-e edit · ctrl-r rescan\n' \
+    "$(sort_mode_label "$mode")"
+  printf '%-*s  %5s  %5s  %s\n' "$aw" ALIAS ADDED USED TARGET
+}
+
+# Header and rows in one stream: what fzf is fed at startup, and what ctrl-s
+# reloads. --next steps the mode on first, which is the only thing ctrl-s does.
+picker_feed() {
+  local aw mode
+  [ "${1:-}" = --next ] && sort_mode_advance
+  aw="$(alias_width)"
+  mode="$(sort_mode_read)"
+  picker_header "$aw" "$mode"
+  picker_lines "$aw" "$mode"
 }
 
 # Runs fzf and prints the chosen alias on stdout — nothing else goes to stdout,
@@ -1775,23 +1867,40 @@ picker_lines() {
 run_picker() {
   # "nothing to pick from" before "install fzf": with an empty config the first
   # is the actionable message, and fzf would have nothing to show either way.
-  local lines out key rec aw
+  local lines out key rec aw mode stty_saved=""
   aw="$(alias_width)"
-  lines="$(picker_lines "$aw")"
+  mode="$(sort_mode_read)"
+  lines="$(picker_lines "$aw" "$mode")"
   if [ -z "$lines" ]; then
     warn "no hosts in $CONFIG yet — run: sushi scan"
     return 1
   fi
   have fzf || { warn_no_fzf; return 1; }
 
-  out="$(printf '%s\n' "$lines" \
+  # ctrl-s reloads under the next ordering; the mode it reads lives here.
+  SORT_STATE="$(mktemp "${TMPDIR:-/tmp}/sushi-sort.XXXXXX")" || die "mktemp failed"
+  trap cleanup_sort EXIT
+  export SUSHI_SORT_STATE="$SORT_STATE"
+  printf '%s\n' "$mode" > "$SORT_STATE"
+
+  # ^S is XOFF under legacy terminal flow control: with ixon on, the tty eats the
+  # keypress and freezes the screen instead of letting fzf see it. Freed for the
+  # life of the picker and put back after — fzf restores the termios it started
+  # with, so this has to be saved outside it.
+  stty_saved="$(stty -g < /dev/tty 2>/dev/null)" || stty_saved=""
+  [ -n "$stty_saved" ] && stty -ixon < /dev/tty 2>/dev/null
+
+  out="$( { picker_header "$aw" "$mode"; printf '%s\n' "$lines"; } \
     | FZF --ansi --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
         --prompt='ssh ❯ ' --query="${1:-}" \
-        --header="$(printf 'ENTER connect · ctrl-e edit config · ctrl-r rescan history\n%-*s  %5s  %5s  %s' \
-                     "$aw" ALIAS ADDED USED TARGET)" \
+        --header-lines=2 \
         --expect=ctrl-e,ctrl-r \
+        --bind "ctrl-s:reload('$SELF' __pickerfeed --next)" \
         --preview="'$SELF' __preview {2}" \
         --preview-window='right:45%')"
+
+  [ -n "$stty_saved" ] && stty "$stty_saved" < /dev/tty 2>/dev/null
+  cleanup_sort; SORT_STATE=""; unset SUSHI_SORT_STATE
 
   key="$(printf '%s\n' "$out" | sed -n 1p)"
   rec="$(printf '%s\n' "$out" | sed -n 2p | cut -f2)"
@@ -1847,7 +1956,8 @@ case "${1:-}" in
 $a"; done
                      remove_managed_aliases "$names" ;;
   __preview)         cmd_preview "${2:-}" ;;     # internal: fzf preview pane
-  __lines)           picker_lines ;;             # internal: what fzf is fed
+  __lines)           shift; picker_lines "" "${1:-}" ;;   # internal: the picker's rows
+  __pickerfeed)      shift; picker_feed "${1:-}" ;;  # internal: header + rows, for reload
   __aliases)         config_hosts | AWK -F'\t' '{ print $1 }' | sort -f ;;  # for completion
   __fzfhint)         fzf_install_cmd; printf '\n' ;;   # internal: install.sh reuses this
   __subcommands)     printf '%s\n' "$SUBCOMMANDS" | tr ' ' '\n' ;;

@@ -15,7 +15,7 @@ ssh ⏎
 
 ```
   ssh ❯ stag                                        ┌──────────────────────────────────┐
-  ENTER connect · ctrl-e edit · ctrl-r rescan       │   deploy@staging.example.com:2022 │
+  ENTER connect · ctrl-s sort · ctrl-e edit         │   deploy@staging.example.com:2022 │
   ALIAS       ADDED   USED  TARGET                  │                                  │
 > staging       14d     2h  deploy@staging.exa…     │   resolved                       │
   db1           14d     1d  luca@db1.example.…      │     user           deploy        │
@@ -76,11 +76,27 @@ ssh staging       # untouched — goes straight to the real ssh
 ```
 
 …where `ssh` on its own opens the picker in the default mode. Inside it: type to filter, `ENTER` to
-connect, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan history. In the `scan` picker, `ctrl-x` dismisses rows.
+connect, `ctrl-s` to change the ordering, `ctrl-e` to edit `~/.ssh/config`, `ctrl-r` to rescan
+history. In the `scan` picker, `ctrl-x` dismisses rows.
 
-The picker is ordered by how often you actually reach each host, not
-alphabetically — `bastion` being first because it starts with b is not useful. Hosts with no history
-trail at the bottom, A-Z among themselves. `SUSHI_SORT=alpha` restores plain alphabetical.
+The picker is never ordered alphabetically by accident — `bastion` being first because it starts
+with b is not useful. `ctrl-s` cycles the three orderings that are, and the header always says which
+one you are looking at:
+
+| | | |
+|---|---|---|
+| **last used** | the host you touched most recently, first | the default |
+| **last added** | newest import first — what `scan` just brought in | |
+| **most used** | the biggest count in your history, first | the old default |
+
+Recency leads because it is the better guess: the host you were on an hour ago is usually the one
+you want next, while a lifetime count keeps the box you hammered for a week last spring pinned to
+the top forever. Rows the ordering knows nothing about — no `# added` date, no history — trail at
+the bottom, A-Z among themselves.
+
+`SUSHI_SORT` picks the mode the picker opens in: `used` (default), `added`, `count`, or `alpha` for
+plain A-Z. `alpha` sits outside the cycle, so the first `ctrl-s` steps out of it into `last used`.
+The mode you cycle to lasts for that picker session; the next `ssh` starts from `SUSHI_SORT` again.
 
 Each row also carries two ages, `ADDED` and `USED`, with the full dates in the preview pane as
 `added at` and `last used at`. They sit between the alias and the target — the target is the column
@@ -319,7 +335,9 @@ Everything sushi writes goes inside a marked block:
   as a command — `scan`, `add`, `list` and `ignore` need no integration at all.
 - `SUSHI_MODE=wrap` disables terminal-native `ssh` completion, as described above. Use `enter`.
 - `^S` is XOFF under legacy terminal flow control; `key` mode runs `stty -ixon` when that is the
-  chosen key. Pass `--key='^G'` if you'd rather it left your tty settings alone.
+  chosen key, and the picker does the same for as long as it is open so `ctrl-s` reaches fzf instead
+  of freezing the screen. Both put your original tty settings back; pass `--key='^G'` if you'd
+  rather `key` mode didn't touch them at all.
 - Generated aliases are a best guess (first DNS label, or `srv-10-0-0-5` for an IP). Rename them —
   edits inside the managed block survive.
 - On Linux, `gnome-sushi` also installs a `/usr/bin/sushi` (a file previewer). If you have it, one

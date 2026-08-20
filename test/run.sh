@@ -628,20 +628,86 @@ EOF
 } > "$H/.zsh_history"
 
 export XDG_CACHE_HOME="$WORK/cache"
-order="$(run "$H" __lines | cut -f1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }')"
-assert_eq "most-used host first"  "zulu" "$(printf '%s\n' "$order" | sed -n 1p)"
-assert_eq "then the next"         "mike" "$(printf '%s\n' "$order" | sed -n 2p)"
-assert_eq "a bare \`ssh alias\` counts for that alias" "alpha" "$(printf '%s\n' "$order" | sed -n 3p)"
-assert_eq "never-used hosts trail" "cold" "$(printf '%s\n' "$order" | sed -n 4p)"
 
-order="$(HOME="$H" SUSHI_SORT=alpha "$SUSHI" __lines | cut -f1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }')"
+# the alias column of `__lines`, in order, colours stripped
+aliases() { cut -f1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }'; }
+
+# default: most recently used first. alpha's `ssh alpha` is dated 90, zulu's
+# newest is 19, mike's 15 — so recency and frequency disagree here on purpose.
+order="$(run "$H" __lines | aliases)"
+assert_eq "last-used host first"   "alpha" "$(printf '%s\n' "$order" | sed -n 1p)"
+assert_eq "then the next"          "zulu"  "$(printf '%s\n' "$order" | sed -n 2p)"
+assert_eq "a bare \`ssh alias\` counts for that alias" "alpha" "$(printf '%s\n' "$order" | sed -n 1p)"
+assert_eq "never-used hosts trail" "cold"  "$(printf '%s\n' "$order" | sed -n 4p)"
+
+order="$(run "$H" __lines count | aliases)"
+assert_eq "sort=count is most-used first" "zulu" "$(printf '%s\n' "$order" | sed -n 1p)"
+assert_eq "...then the next"              "mike" "$(printf '%s\n' "$order" | sed -n 2p)"
+assert_eq "...and unused still trails"    "cold" "$(printf '%s\n' "$order" | sed -n 4p)"
+
+# SUSHI_SORT picks the mode you start in, and `usage` is what count used to be
+order="$(HOME="$H" SUSHI_SORT=usage "$SUSHI" __lines | aliases)"
+assert_eq "SUSHI_SORT=usage still means most-used" "zulu" "$(printf '%s\n' "$order" | sed -n 1p)"
+order="$(HOME="$H" SUSHI_SORT=alpha "$SUSHI" __lines | aliases)"
 assert_eq "SUSHI_SORT=alpha is plain A-Z" "alpha" "$(printf '%s\n' "$order" | sed -n 1p)"
 assert_eq "...second"                     "cold"  "$(printf '%s\n' "$order" | sed -n 2p)"
+order="$(HOME="$H" SUSHI_SORT=nonsense "$SUSHI" __lines | aliases)"
+assert_eq "an unknown SUSHI_SORT falls back to last-used" "alpha" \
+          "$(printf '%s\n' "$order" | sed -n 1p)"
+
+# sort=added reads the `# added` dates out of the stanzas
+Hadd="$(newhome sortadded)"
+cat > "$Hadd/.ssh/config" <<'EOF'
+Host old
+    HostName old.example.com
+    # added 2026-01-02 09:00
+Host newest
+    HostName newest.example.com
+    # added 2026-08-14 09:00
+Host middle
+    HostName middle.example.com
+    # added 2026-05-05 09:00
+Host undated
+    HostName undated.example.com
+EOF
+order="$(run "$Hadd" __lines added | aliases)"
+assert_eq "sort=added is newest first"        "newest" "$(printf '%s\n' "$order" | sed -n 1p)"
+assert_eq "...then the one before it"         "middle" "$(printf '%s\n' "$order" | sed -n 2p)"
+assert_eq "...then the oldest"                "old"    "$(printf '%s\n' "$order" | sed -n 3p)"
+assert_eq "...and a host with no date trails" "undated" "$(printf '%s\n' "$order" | sed -n 4p)"
+
+# the picker feed: two header lines naming the mode, then the rows
+feed="$(run "$H" __pickerfeed)"
+assert_has "the feed header names the sort mode" "ctrl-s sort: last used" \
+           "$(printf '%s\n' "$feed" | sed -n 1p)"
+assert_has "the feed header still names the columns" "ALIAS" \
+           "$(printf '%s\n' "$feed" | sed -n 2p)"
+assert_eq "the feed is the header plus every row" \
+          "$(( $(run "$H" __lines | wc -l) + 2 ))" \
+          "$(printf '%s\n' "$feed" | wc -l | tr -d ' ')"
+
+# ctrl-s: each press advances the mode kept in the state file
+SORTSTATE="$WORK/sortstate"
+: > "$SORTSTATE"
+cycle=""
+for _ in 1 2 3 4; do
+  cycle="$cycle$(HOME="$H" SUSHI_SORT_STATE="$SORTSTATE" SUSHI_THEME=none \
+                 "$SUSHI" __pickerfeed --next | sed -n 1p | sed 's/.*sort: //; s/ · .*//')
+"
+done
+assert_eq "ctrl-s cycles used -> added -> count -> used" \
+          "last added
+most used
+last used
+last added" "$(printf '%s' "$cycle" | sed '/^$/d')"
+printf 'alpha\n' > "$SORTSTATE"
+assert_has "ctrl-s steps out of A-Z into the cycle" "sort: last used" \
+           "$(HOME="$H" SUSHI_SORT_STATE="$SORTSTATE" SUSHI_THEME=none "$SUSHI" __pickerfeed --next | sed -n 1p)"
 
 # no history: every host is unused, so A-Z
 rm -f "$H/.zsh_history"
 rm -rf "$XDG_CACHE_HOME"
-order="$(run "$H" __lines | cut -f1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }')"
+order="$(run "$H" __lines | aliases)"
 assert_eq "with no history it falls back to A-Z" "alpha" "$(printf '%s\n' "$order" | sed -n 1p)"
 
 # the payload column stays clean under both orderings
