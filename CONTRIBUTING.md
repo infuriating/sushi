@@ -67,7 +67,12 @@ rather than writing to `$CONFIG` directly.
 and reachable with `SUSHI_EXTRACT=bash`. Change one, change both — the suite pushes ~4,500 generated
 command lines through each and requires byte-identical output, so it will tell you if you didn't.
 The awk version also absorbed the prefix stripping (zsh timestamps, fish's `- cmd: `, `&&`/`;`/`|`
-segments) that used to live in `scan_history`'s loop, so that part has to stay in step too.
+segments) that used to live in `scan_history`'s loop, so that part has to stay in step too — and with
+it the small state machine that reads *dates*, which is the fiddliest thing in either parser: zsh
+keeps the epoch inline, bash writes it on the line before the command, fish on the line after. The
+line-after case cannot be resolved in a streaming parser, so it goes downstream as an `@@TS@@|<epoch>`
+marker that `scan_history`'s aggregator folds into the row above it. Both parsers must emit the same
+markers in the same places, and the corpus covers all three shapes.
 
 If you are wondering whether the awk version is worth the trouble: a bash function call per history
 line is ~160us, which was ~450ms of a ~570ms scan on a 20k-line history — 80% of it, and the reason
@@ -154,14 +159,14 @@ admitting the gap.
 Three hidden subcommands dump intermediate state:
 
 ```bash
-sushi __candidates       # raw history scan:  count|user|host|port
+sushi __candidates       # raw history scan:  count|user|host|port|key|jump|last
 sushi __lines            # exactly what is piped into fzf
 sushi __preview foo      # the preview pane for one alias
 sushi __rmalias foo bar  # delete managed stanzas without the picker
 sushi __scanmenu         # scan picker rows
 sushi __ignoremenu       # ignore picker rows
 sushi __subcommands      # what the zsh wrapper passes through
-sushi __extract          # history lines on stdin -> user|host|port|key|jump
+sushi __extract          # history lines on stdin -> user|host|port|key|jump|epoch
 sushi __ignoresplit      # ignore-picker selection on stdin -> P/D instructions
 sushi __aliases          # alias names only, for completion
 sushi __fzfhint          # the platform's fzf install command (install.sh reuses it)
