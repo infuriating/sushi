@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 512" width="1280" height="512" role="img" aria-labelledby="pt pd">
+<title id="pt">the sushi picker</title>
+<desc id="pd">The fzf picker: an ssh prompt, four hosts with alias, added and used ages and target, and a preview pane showing the resolved connection, when the host was added and last used, and its stanza in ~/.ssh/config.</desc>
+<defs><linearGradient id="edge" gradientUnits="userSpaceOnUse" x1="24" y1="24" x2="1256" y2="488"><stop offset="0" stop-color="#22c7e8"/><stop offset="0.45" stop-color="#8c6fe0"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs>
+<rect width="1280" height="512" rx="18" fill="#0b0912"/>
+<rect x="24" y="24" width="1232" height="464" rx="16" fill="#131020" stroke="url(#edge)" stroke-width="2"/>
+<circle cx="52" cy="50" r="5" fill="#22c7e8" opacity="0.8"/>
+<circle cx="72" cy="50" r="5" fill="#8c6fe0" opacity="0.8"/>
+<circle cx="92" cy="50" r="5" fill="#ec4899" opacity="0.8"/>
+<rect x="52" y="76" width="1176" height="384" rx="6" fill="none" stroke="#5b4a7d" stroke-width="1"/>
+<line x1="719" y1="76" x2="719" y2="460" stroke="#5b4a7d" stroke-width="1"/>
+<rect x="53" y="169" width="666" height="21" fill="#241a33"/>
+<rect x="118.6" y="86" width="9.1" height="17" fill="#ec4899" opacity="0.55"/>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14">
+<text x="64" y="100" xml:space="preserve" textLength="72.8" lengthAdjust="spacing"><tspan fill="#a99fbd">  </tspan><tspan fill="#ec4899">ssh ❯ </tspan></text>
+<text x="64" y="121" xml:space="preserve" textLength="45.5" lengthAdjust="spacing"><tspan fill="#a99fbd">  </tspan><tspan fill="#8c6fe0">4/4</tspan></text>
+<text x="64" y="142" xml:space="preserve" textLength="637" lengthAdjust="spacing"><tspan fill="#a99fbd">  </tspan><tspan fill="#8c6fe0">ENTER connect · ctrl-s sort: last used · ctrl-e edit · ctrl-r rescan</tspan></text>
+<text x="64" y="163" xml:space="preserve" textLength="291.2" lengthAdjust="spacing"><tspan fill="#a99fbd">  </tspan><tspan fill="#8c6fe0">ALIAS     ADDED   USED  TARGET</tspan></text>
+<text x="64" y="184" xml:space="preserve" textLength="473.2" lengthAdjust="spacing"><tspan fill="#ec4899">▍ </tspan><tspan fill="#fdf7fb">staging </tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#8c6fe0">  14d     2h</tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#fdf7fb">deploy@staging.example.com</tspan></text>
+<text x="64" y="205" xml:space="preserve" textLength="418.6" lengthAdjust="spacing"><tspan fill="#ec4899">  </tspan><tspan fill="#fdf7fb">db1     </tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#8c6fe0">  14d     1d</tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#7a6e91">luca@db1.example.com</tspan></text>
+<text x="64" y="226" xml:space="preserve" textLength="445.9" lengthAdjust="spacing"><tspan fill="#ec4899">  </tspan><tspan fill="#fdf7fb">prod-web</tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#8c6fe0">   6d     3d</tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#7a6e91">deploy@10.20.30.40:2222</tspan></text>
+<text x="64" y="247" xml:space="preserve" textLength="427.7" lengthAdjust="spacing"><tspan fill="#ec4899">  </tspan><tspan fill="#fdf7fb">bastion </tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#8c6fe0">    -    21d</tspan><tspan fill="#a99fbd">  </tspan><tspan fill="#7a6e91">luca@jump.example.com</tspan></text>
+<text x="735" y="100" xml:space="preserve" textLength="300.3" lengthAdjust="spacing"><tspan fill="#7a6e91">  </tspan><tspan fill="#f472b6">deploy@staging.example.com:2022</tspan></text>
+<text x="735" y="142" xml:space="preserve" textLength="91" lengthAdjust="spacing"><tspan fill="#7a6e91">  </tspan><tspan fill="#8c6fe0">resolved</tspan></text>
+<text x="735" y="163" xml:space="preserve" textLength="227.5" lengthAdjust="spacing"><tspan fill="#7a6e91">    </tspan><tspan fill="#7a6e91">user          </tspan><tspan fill="#7a6e91"> </tspan><tspan fill="#fdf7fb">deploy</tspan></text>
+<text x="735" y="184" xml:space="preserve" textLength="345.8" lengthAdjust="spacing"><tspan fill="#7a6e91">    </tspan><tspan fill="#7a6e91">hostname      </tspan><tspan fill="#7a6e91"> </tspan><tspan fill="#fdf7fb">staging.example.com</tspan></text>
+<text x="735" y="205" xml:space="preserve" textLength="209.3" lengthAdjust="spacing"><tspan fill="#7a6e91">    </tspan><tspan fill="#7a6e91">port          </tspan><tspan fill="#7a6e91"> </tspan><tspan fill="#fdf7fb">2022</tspan></text>
+<text x="735" y="247" xml:space="preserve" textLength="63.7" lengthAdjust="spacing"><tspan fill="#7a6e91">  </tspan><tspan fill="#8c6fe0">usage</tspan></text>
+<text x="735" y="268" xml:space="preserve" textLength="382.2" lengthAdjust="spacing"><tspan fill="#7a6e91">    </tspan><tspan fill="#7a6e91">added at      </tspan><tspan fill="#7a6e91"> </tspan><tspan fill="#fdf7fb">2026-08-06 09:12  (14d)</tspan></text>
+<text x="735" y="289" xml:space="preserve" textLength="373.1" lengthAdjust="spacing"><tspan fill="#7a6e91">    </tspan><tspan fill="#7a6e91">last used at  </tspan><tspan fill="#7a6e91"> </tspan><tspan fill="#fdf7fb">2026-08-20 07:41  (2h)</tspan></text>
+<text x="735" y="331" xml:space="preserve" textLength="227.5" lengthAdjust="spacing"><tspan fill="#7a6e91">  </tspan><tspan fill="#8c6fe0">stanza in ~/.ssh/config</tspan></text>
+<text x="735" y="352" xml:space="preserve" textLength="145.6" lengthAdjust="spacing"><tspan fill="#7a6e91">    Host staging</tspan></text>
+<text x="735" y="373" xml:space="preserve" textLength="327.6" lengthAdjust="spacing"><tspan fill="#7a6e91">        HostName staging.example.com</tspan></text>
+<text x="735" y="394" xml:space="preserve" textLength="172.9" lengthAdjust="spacing"><tspan fill="#7a6e91">        User deploy</tspan></text>
+<text x="735" y="415" xml:space="preserve" textLength="154.7" lengthAdjust="spacing"><tspan fill="#7a6e91">        Port 2022</tspan></text>
+<text x="735" y="436" xml:space="preserve" textLength="291.2" lengthAdjust="spacing"><tspan fill="#7a6e91">        # added 2026-08-06 09:12</tspan></text>
+</g></svg>

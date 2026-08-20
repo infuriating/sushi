@@ -13,26 +13,9 @@ history — then gets out of the way.
 ssh ⏎
 ```
 
-```
-  ssh ❯ stag                                        ┌──────────────────────────────────┐
-  ENTER connect · ctrl-s sort · ctrl-e edit         │   deploy@staging.example.com:2022 │
-  ALIAS       ADDED   USED  TARGET                  │                                  │
-> staging       14d     2h  deploy@staging.exa…     │   resolved                       │
-  db1           14d     1d  luca@db1.example.…      │     user           deploy        │
-  prod-web       6d     3d  deploy@10.20.30.40…     │     port           2022          │
-  bastion         -    21d  luca@jump.example…      │                                  │
-                                                    │   usage                          │
-                                                    │     added at       2026-08-06 …  │
-                                                    │     last used at   2026-08-20 …  │
-                                                    │                                  │
-                                                    │   stanza in ~/.ssh/config        │
-                                                    │     Host staging                 │
-                                                    │         HostName staging.exam…   │
-                                                    │         User deploy              │
-                                                    │         Port 2022                │
-                                                    │         # added 2026-08-06 09:12 │
-                                                    └──────────────────────────────────┘
-```
+<p align="center">
+  <img src="./assets/picker.svg" width="880" alt="The sushi picker: an ssh prompt over four hosts — alias, how long ago each was added and last used, and the target — with a preview pane showing the resolved connection, the dates, and the host's stanza in ~/.ssh/config.">
+</p>
 
 ## The idea
 
