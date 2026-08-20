@@ -64,7 +64,9 @@ terminal's own features (native SSH blocks, completions) until you close it. A n
 always safe. Re-sourcing sushi is idempotent, so reloading repeatedly costs nothing.
 
 Requires zsh, bash 3.2+ (macOS's system bash is fine) and [fzf](https://github.com/junegunn/fzf)
-for the picker. `scan` and `list` work without fzf.
+for the picker. `scan` and `list` work without fzf. fzf 0.36 or newer redraws the list in a single
+paint when `ctrl-s` changes the ordering; older versions get the same orderings with a brief flicker
+as the list is replaced.
 
 ## Use
 
@@ -97,6 +99,11 @@ the bottom, A-Z among themselves.
 `SUSHI_SORT` picks the mode the picker opens in: `used` (default), `added`, `count`, or `alpha` for
 plain A-Z. `alpha` sits outside the cycle, so the first `ctrl-s` steps out of it into `last used`.
 The mode you cycle to lasts for that picker session; the next `ssh` starts from `SUSHI_SORT` again.
+
+Each ordering is built once per picker and re-read after that, so going back to one you have already
+seen is free, and the whole cycle costs three builds and then nothing. It also keeps the ages
+honest: they are frozen at the same instant for every mode, so `2h` cannot become `3h` halfway
+round.
 
 Each row also carries two ages, `ADDED` and `USED`, with the full dates in the preview pane as
 `added at` and `last used at`. They sit between the alias and the target — the target is the column

@@ -1766,7 +1766,8 @@ sort_mode_label() {
 # Trap-visible for the same reason SCAN_CACHE is — see cleanup_scan.
 SORT_STATE=""
 cleanup_sort() {
-  [ -n "$SORT_STATE" ] && rm -f "$SORT_STATE"
+  # the mode, plus one cached feed per ordering visited — see picker_feed
+  [ -n "$SORT_STATE" ] && rm -f "$SORT_STATE" "$SORT_STATE".feed.*
   return 0
 }
 
@@ -1851,13 +1852,63 @@ picker_header() {
 
 # Header and rows in one stream: what fzf is fed at startup, and what ctrl-s
 # reloads. --next steps the mode on first, which is the only thing ctrl-s does.
+#
+# Each ordering is built at most once per picker. Nothing it is built from can
+# change while the picker is up — ctrl-e and ctrl-r both close it before they
+# touch the config or the history — so the second visit to an ordering is a
+# `cat` of the first, and cycling all the way round costs three builds and then
+# nothing. The ages are frozen at the same instant for every mode as a result,
+# which is what you want: `2h` must not become `3h` halfway through a cycle.
+#
+# 0600, like the history cache and for the same reason: these rows are your
+# whole server inventory, and a default umask would hand them to every account
+# on the box.
 picker_feed() {
-  local aw mode
+  local aw mode cache="" feed
   [ "${1:-}" = --next ] && sort_mode_advance
-  aw="$(alias_width)"
   mode="$(sort_mode_read)"
-  picker_header "$aw" "$mode"
-  picker_lines "$aw" "$mode"
+
+  [ -n "${SUSHI_SORT_STATE:-}" ] && cache="$SUSHI_SORT_STATE.feed.$mode"
+  if [ -n "$cache" ] && [ -s "$cache" ]; then
+    cat "$cache"
+    return 0
+  fi
+
+  aw="$(alias_width)"
+  feed="$(picker_header "$aw" "$mode"; picker_lines "$aw" "$mode")"
+  [ -n "$feed" ] || return 0
+  if [ -n "$cache" ]; then
+    ( umask 077; printf '%s\n' "$feed" > "$cache" ) 2>/dev/null
+  fi
+  printf '%s\n' "$feed"
+}
+
+# Which reload action ctrl-s gets.
+#
+# Plain `reload` runs the command asynchronously: fzf empties the list the
+# moment you press the key — and since the header travels down the same pipe,
+# the two header lines go with it and everything below jumps up — then fills it
+# back in when the child is done. That flash is the "little jump". `reload-sync`
+# waits for the complete output and swaps it in one paint instead.
+#
+# It landed in fzf 0.36, and an action fzf does not know makes it exit with a
+# usage error at startup rather than ignore the bind — so on anything older the
+# async reload is still the right answer, a flicker being better than no picker.
+fzf_reload_action() {
+  local v maj min
+  v="$(fzf --version 2>/dev/null)"
+  v="${v%% *}"          # "0.36.0 (brew)" -> "0.36.0"
+  maj="${v%%.*}"
+  v="${v#*.}"
+  min="${v%%.*}"
+  min="${min%%[!0-9]*}" # some distros ship "0.24.4-1"
+  case "$maj$min" in
+    ''|*[!0-9]*) printf 'reload'; return 0 ;;
+  esac
+  if [ "$maj" -gt 0 ] || [ "$min" -ge 36 ]
+    then printf 'reload-sync'
+    else printf 'reload'
+  fi
 }
 
 # Runs fzf and prints the chosen alias on stdout — nothing else goes to stdout,
@@ -1865,23 +1916,26 @@ picker_feed() {
 # the ctrl-e / ctrl-r side trips send their output to stderr for the same reason.
 # Returns 1 when nothing was chosen.
 run_picker() {
+  local feed out key rec mode rows stty_saved=""
+
+  # ctrl-s reloads under the next ordering; the mode it reads, and the rows it
+  # has already built, live here. Set up before the first feed so that feed is
+  # cached too — come back round the cycle and it is a `cat`.
+  SORT_STATE="$(mktemp "${TMPDIR:-/tmp}/sushi-sort.XXXXXX")" || die "mktemp failed"
+  trap cleanup_sort EXIT
+  export SUSHI_SORT_STATE="$SORT_STATE"
+  mode="$(sort_mode_read)"
+  printf '%s\n' "$mode" > "$SORT_STATE"
+
   # "nothing to pick from" before "install fzf": with an empty config the first
   # is the actionable message, and fzf would have nothing to show either way.
-  local lines out key rec aw mode stty_saved=""
-  aw="$(alias_width)"
-  mode="$(sort_mode_read)"
-  lines="$(picker_lines "$aw" "$mode")"
-  if [ -z "$lines" ]; then
+  feed="$(picker_feed)"
+  rows=$(( $(printf '%s\n' "$feed" | wc -l) - 2 ))   # minus the header block
+  if [ "$rows" -le 0 ]; then
     warn "no hosts in $CONFIG yet — run: sushi scan"
     return 1
   fi
   have fzf || { warn_no_fzf; return 1; }
-
-  # ctrl-s reloads under the next ordering; the mode it reads lives here.
-  SORT_STATE="$(mktemp "${TMPDIR:-/tmp}/sushi-sort.XXXXXX")" || die "mktemp failed"
-  trap cleanup_sort EXIT
-  export SUSHI_SORT_STATE="$SORT_STATE"
-  printf '%s\n' "$mode" > "$SORT_STATE"
 
   # ^S is XOFF under legacy terminal flow control: with ixon on, the tty eats the
   # keypress and freezes the screen instead of letting fzf see it. Freed for the
@@ -1890,12 +1944,12 @@ run_picker() {
   stty_saved="$(stty -g < /dev/tty 2>/dev/null)" || stty_saved=""
   [ -n "$stty_saved" ] && stty -ixon < /dev/tty 2>/dev/null
 
-  out="$( { picker_header "$aw" "$mode"; printf '%s\n' "$lines"; } \
+  out="$(printf '%s\n' "$feed" \
     | FZF --ansi --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
         --prompt='ssh ❯ ' --query="${1:-}" \
         --header-lines=2 \
         --expect=ctrl-e,ctrl-r \
-        --bind "ctrl-s:reload('$SELF' __pickerfeed --next)" \
+        --bind "ctrl-s:$(fzf_reload_action)('$SELF' __pickerfeed --next)" \
         --preview="'$SELF' __preview {2}" \
         --preview-window='right:45%')"
 
@@ -1960,6 +2014,7 @@ $a"; done
   __pickerfeed)      shift; picker_feed "${1:-}" ;;  # internal: header + rows, for reload
   __aliases)         config_hosts | AWK -F'\t' '{ print $1 }' | sort -f ;;  # for completion
   __fzfhint)         fzf_install_cmd; printf '\n' ;;   # internal: install.sh reuses this
+  __fzfreload)       fzf_reload_action; printf '\n' ;;  # internal: which reload ctrl-s gets
   __subcommands)     printf '%s\n' "$SUBCOMMANDS" | tr ' ' '\n' ;;
   __scanmenu)        scan_menu ;;                # internal: scan picker's fzf input
   __ignoremenu)      ignore_rows ;;             # internal: ignore picker's fzf input
