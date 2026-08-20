@@ -167,6 +167,7 @@ if (( $+functions[compdef] )); then
         'theme:show the active theme, or list and set themes'
         'themes:list every theme on the search path'
         'choose:print the chosen alias instead of connecting'
+        'doctor:check binaries, ~/.ssh, integration, theme'
         'help:show usage'
         '--version:print the version'
       )

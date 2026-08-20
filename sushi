@@ -15,6 +15,7 @@
 #   sushi theme list   list every theme on the search path (also: sushi themes)
 #   sushi theme set    pick a theme in fzf and keep it; `set <name>` skips the picker
 #   sushi choose       print the chosen alias instead of connecting
+#   sushi doctor       check binaries, ~/.ssh, the integration, the theme
 #   sushi --version    print the version
 #
 # Requires: bash 3.2+, awk, ssh. fzf only for the picker.
@@ -45,7 +46,7 @@ INSTALL_BEGIN="# >>> sushi >>>"
 # `sushi __subcommands` so sushi.zsh's wrapper function does not have to keep a
 # second copy in sync — it got one wrong once and silently turned `sushi ignore`
 # into a picker search for the word "ignore".
-SUBCOMMANDS='scan add ignore delete rm list ls edit theme themes help choose version'
+SUBCOMMANDS='scan add ignore delete rm list ls edit theme themes help choose doctor version'
 
 die()  { printf 'sushi: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'sushi: %s\n' "$*" >&2; }
@@ -103,6 +104,7 @@ $a"; done
   __extract)         extract_stream ;;          # internal: history lines -> records
   theme)             shift; cmd_theme "$@" ;;
   themes)            cmd_themes ;;                 # alias for `theme list`
+  doctor)            shift; cmd_doctor "$@" ;;
   edit)              exec "${EDITOR:-vi}" "$CONFIG" ;;
   help|-h|--help)    usage ;;
   version|--version|-V) cmd_version ;;

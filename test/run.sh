@@ -1422,7 +1422,47 @@ out="$(run "$H" help)"
 assert_has "usage lists add"        "sushi add"     "$out"
 assert_has "usage lists --version"  "sushi --version" "$out"
 assert_has "usage still lists scan" "sushi scan"    "$out"
+assert_has "usage lists doctor"     "sushi doctor"  "$out"
 assert_lacks "and stops at the code" "set -uo"      "$out"
+
+# --------------------------------------------------------------------------
+section "sushi doctor"
+
+DH="$(newhome doctor)"
+chmod 700 "$DH/.ssh"
+drun() { SHELL=/bin/zsh HOME="$DH" SUSHI_RC="$DH/.zshrc" SUSHI_THEME=none "$SUSHI" doctor "$@"; }
+
+out="$(drun 2>&1)"
+assert_has "doctor prints the version"              "sushi 0"           "$out"
+assert_has "and ssh"                                "ssh"               "$out"
+assert_has "and awk"                                "awk"               "$out"
+assert_has "a missing config is a warning"          "none yet"          "$out"
+assert_has "a missing integration is a warning"     "install.sh"        "$out"
+assert_has "and empty history is a warning"         "scan will be empty" "$out"
+assert_eq  "warnings are not a failure"             "0"                 "$(drun >/dev/null 2>&1; echo $?)"
+assert_has "doctor --help is one line" "sushi doctor" "$(drun --help)"
+assert_lacks "and is not the picker empty-state" "no hosts in" "$(drun --help)"
+
+printf 'Host box\n    HostName box.example.com\n' > "$DH/.ssh/config"
+chmod 600 "$DH/.ssh/config"
+printf ': 1:0;ssh box.example.com\n' > "$DH/.zsh_history"
+{
+  printf '%s\n' '# >>> sushi >>>'
+  printf '%s\n' ': ${SUSHI_MODE:=key,enter}'
+  printf '%s\n' 'source "/x/sushi.zsh"'
+  printf '%s\n' '# <<< sushi <<<'
+} > "$DH/.zshrc"
+out="$(drun 2>&1)"
+assert_has "a readable config is counted"           "1 host"            "$out"
+assert_has "and marked parseable"                   "parses"            "$out"
+assert_has "history files are named"                ".zsh_history"      "$out"
+assert_has "the sourced rc is integration ok"       "key,enter"         "$out"
+assert_eq  "a healthy machine exits 0"              "0"                 "$(drun >/dev/null 2>&1; echo $?)"
+
+printf 'Host box\n    NotARealSshOption yes\n' > "$DH/.ssh/config"
+out="$(drun 2>&1)"
+assert_has "an unparseable config is a failure"     "cannot parse"      "$out"
+assert_eq  "and doctor exits 1"                     "1"                 "$(drun >/dev/null 2>&1; echo $?)"
 
 # --------------------------------------------------------------------------
 section "added at / last used at"
