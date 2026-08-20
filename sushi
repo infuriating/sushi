@@ -264,6 +264,27 @@ if [ "$SUSHI_THEME" != none ]; then
   C_OFF=$'\033[0m'
 fi
 
+# Full screen, not a slice of the current one.
+#
+# `--height=80%` draws the picker inline, in the bottom 80% of the screen you are
+# already looking at, and fzf remembers where that region starts. Shrink the
+# terminal while it is up and the top of that region scrolls off into scrollback:
+# the remembered origin now points at a row that no longer exists, so the repaint
+# that follows the resize clears the wrong lines and lands the window somewhere
+# new — leaving the previous frame stranded above it. Shrink again and you get
+# another one, until the screen is a stack of half-erased pickers that survives
+# the picker exiting.
+#
+# fzf treats `--height=100%` (like no --height at all) as a different mode: it
+# takes the alternate screen, so a resize is a repaint of a buffer it owns
+# outright, and quitting puts your terminal back byte for byte with nothing left
+# in the scrollback. That is the whole fix — everything below is unchanged.
+#
+# First on the line, which makes it the weakest thing fzf is handed: a call site
+# that wants something else can say so, and SUSHI_FZF_OPTS='--height=80%' still
+# buys the inline picker back for anyone who prefers it and does not resize.
+FZF_WINDOW_ARGS=(--height=100%)
+
 FZF_THEME_ARGS=()
 [ -n "$FZF_COLORS" ]  && FZF_THEME_ARGS+=(--color="$FZF_COLORS")
 [ -n "$SYM_POINTER" ] && FZF_THEME_ARGS+=(--pointer="$SYM_POINTER")
@@ -275,11 +296,13 @@ if [ -n "$SUSHI_FZF_OPTS" ]; then
   FZF_USER_ARGS=($SUSHI_FZF_OPTS)
 fi
 
-# Theme first (weakest), the call site's own options next, SUSHI_FZF_OPTS last —
-# fzf lets the later flag win, so anything you set overrides everything here.
+# Geometry and theme first (weakest), the call site's own options next, and
+# SUSHI_FZF_OPTS last — fzf lets the later flag win, so anything you set
+# overrides everything here.
 # The `${a[@]+...}` form is for bash 3.2, where "${empty[@]}" trips `set -u`.
 FZF() {
-  fzf ${FZF_THEME_ARGS[@]+"${FZF_THEME_ARGS[@]}"} \
+  fzf ${FZF_WINDOW_ARGS[@]+"${FZF_WINDOW_ARGS[@]}"} \
+      ${FZF_THEME_ARGS[@]+"${FZF_THEME_ARGS[@]}"} \
       "$@" \
       ${FZF_USER_ARGS[@]+"${FZF_USER_ARGS[@]}"}
 }
@@ -1394,7 +1417,7 @@ cmd_scan() {
     # ctrl-x only notes the pattern and redraws from the cache; the ignore file is
     # written once, below, after the picker closes.
     selected="$(printf '%s\n' "$menu" | FZF --ansi --multi --delimiter='\t' --with-nth=1 \
-      --height=80% --reverse --border --prompt='import ❯ ' \
+      --reverse --border --prompt='import ❯ ' \
       --header="TAB select · ctrl-a all · ENTER import · ctrl-x never show again · ESC cancel
 sorted by how often you used them$hidden_note" \
       --bind 'ctrl-a:select-all' \
@@ -1663,7 +1686,7 @@ cmd_ignore() {
       cur="$(ignore_entries)"
       [ -n "$cur" ] || { printf 'Nothing ignored yet (%s)\n' "$IGNORE"; return 0; }
       if have fzf && [ -t 0 ]; then
-        sel="$(printf '%s\n' "$cur" | FZF --multi --height=60% --reverse --border \
+        sel="$(printf '%s\n' "$cur" | FZF --multi --reverse --border \
           --prompt='un-ignore ❯ ' --header='TAB select · ENTER confirm · ESC cancel' \
           --bind 'ctrl-a:select-all')"
         [ -n "$sel" ] || { printf 'Nothing selected.\n'; return 0; }
@@ -1709,7 +1732,7 @@ EOF
 
   local sel
   if have fzf && [ -t 0 ]; then
-    sel="$(printf '%s\n' "$rows" | FZF --ansi --multi --height=80% --reverse --border \
+    sel="$(printf '%s\n' "$rows" | FZF --ansi --multi --reverse --border \
       --prompt='ignore ❯ ' \
       --header=$'TAB select · ENTER confirm · ESC cancel\nscan = never offer again · imported = also delete its Host stanza' \
       --bind 'ctrl-a:select-all')"
@@ -2134,7 +2157,7 @@ run_picker() {
   [ -n "$stty_saved" ] && stty -ixon < /dev/tty 2>/dev/null
 
   out="$(printf '%s\n' "$feed" \
-    | FZF --ansi --delimiter='\t' --with-nth=1 --height=80% --reverse --border \
+    | FZF --ansi --delimiter='\t' --with-nth=1 --reverse --border \
         --prompt='ssh ❯ ' --query="${1:-}" \
         --header-lines=2 \
         --expect=ctrl-e,ctrl-r \

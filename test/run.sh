@@ -748,6 +748,45 @@ assert_eq "fzf 0.24 keeps the async reload" "reload" "$(fakefzf '0.24.4-1')"
 assert_eq "an unreadable version keeps the async reload" "reload" "$(fakefzf 'unknown')"
 rm -rf "$WORK/fakebin"
 
+# The picker must ask fzf for the whole screen, not a slice of it.
+#
+# `--height=80%` draws inline, and fzf then remembers where that region begins:
+# shrink the terminal while the picker is up and the top of the region scrolls
+# into scrollback, so the post-resize repaint clears the wrong rows and strands
+# the old frame above the new one — one more stacked, half-erased picker per
+# resize, still there after the picker exits. `--height=100%` puts fzf on the
+# alternate screen, where a resize is its own buffer's problem and quitting
+# restores the terminal untouched.
+mkdir -p "$WORK/fakebin"
+ARGV="$WORK/fzf.argv"
+cat > "$WORK/fakebin/fzf" <<'STUB'
+#!/bin/sh
+[ "$1" = "--version" ] && { printf '0.74.3 (test)\n'; exit 0; }
+for a in "$@"; do printf '%s\n' "$a"; done >> "$FZF_ARGV"
+exit 1
+STUB
+chmod +x "$WORK/fakebin/fzf"
+: > "$ARGV"
+HOME="$H" FZF_ARGV="$ARGV" PATH="$WORK/fakebin:$PATH" "$SUSHI" choose >/dev/null 2>&1
+assert_has "the picker asks for the full screen" "--height=100%" "$(cat "$ARGV")"
+assert_eq "and asks for exactly one height" "--height=100%" \
+          "$(grep '^--height=' "$ARGV" | sort -u | tr '\n' ' ' | sed 's/ $//')"
+
+# ...but the default is the weakest of the three groups, so anyone who prefers
+# the inline picker can still have it.
+: > "$ARGV"
+HOME="$H" FZF_ARGV="$ARGV" SUSHI_FZF_OPTS='--height=80%' PATH="$WORK/fakebin:$PATH" \
+  "$SUSHI" choose >/dev/null 2>&1
+assert_eq "SUSHI_FZF_OPTS still wins on height" "--height=80%" \
+          "$(grep '^--height=' "$ARGV" | tail -1)"
+rm -rf "$WORK/fakebin"
+
+# The other three pickers — scan, ignore, un-ignore — need a terminal to reach,
+# so they are checked at the source: no call site may name an inline height.
+assert_eq "no picker hardcodes an inline height" "" \
+          "$(grep -v '^[[:space:]]*#' "$SUSHI" | grep -o -- '--height=[0-9]*%' \
+             | grep -v '^--height=100%$' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+
 # no history: every host is unused, so A-Z
 rm -f "$H/.zsh_history"
 rm -rf "$XDG_CACHE_HOME"

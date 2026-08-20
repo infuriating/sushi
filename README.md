@@ -246,6 +246,12 @@ SUSHI_FZF_OPTS='--height=40% --layout=default --preview-window=down,60%'
 `SUSHI_FZF_OPTS` is appended after everything sushi passes, and fzf lets the later flag win, so it
 overrides any of this — including the geometry the call sites set.
 
+The pickers take the whole screen (`--height=100%`), which puts fzf on the alternate screen: resize
+the terminal while one is open and it simply repaints, and closing it leaves your scrollback exactly
+as it was. An inline `--height` of less than 100% is the one override worth knowing the cost of —
+fzf then draws into the screen you are already on and anchors itself to a row that shrinking the
+window scrolls away, so each resize strands another half-erased copy of the picker above the new one.
+
 `sushi list` only colours itself when stdout is a terminal, so piping or capturing it gives you
 clean text.
 
