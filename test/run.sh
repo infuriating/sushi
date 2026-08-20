@@ -704,6 +704,50 @@ printf 'alpha\n' > "$SORTSTATE"
 assert_has "ctrl-s steps out of A-Z into the cycle" "sort: last used" \
            "$(HOME="$H" SUSHI_SORT_STATE="$SORTSTATE" SUSHI_THEME=none "$SUSHI" __pickerfeed --next | sed -n 1p)"
 
+# Each ordering is built once per picker and re-read after that: a press that
+# goes back to a mode you have seen must not pay for the awk and the sort again.
+rm -f "$SORTSTATE" "$SORTSTATE".feed.*
+printf 'used\n' > "$SORTSTATE"
+feed="$(HOME="$H" SUSHI_SORT_STATE="$SORTSTATE" SUSHI_THEME=none "$SUSHI" __pickerfeed)"
+if [ -s "$SORTSTATE.feed.used" ]; then
+  ok "the feed for a mode is cached"
+else
+  no "the feed for a mode is cached"
+fi
+assert_eq "the cache holds exactly what was shown" "$feed" "$(cat "$SORTSTATE.feed.used")"
+# a sentinel proves the second call reads the cache instead of rebuilding
+printf 'SENTINEL\n' > "$SORTSTATE.feed.used"
+assert_eq "a cached mode is served from the cache" "SENTINEL" \
+          "$(HOME="$H" SUSHI_SORT_STATE="$SORTSTATE" SUSHI_THEME=none "$SUSHI" __pickerfeed)"
+HOME="$H" SUSHI_SORT_STATE="$WORK/perm" SUSHI_THEME=none "$SUSHI" __pickerfeed >/dev/null
+assert_eq "the cache is 0600 — it lists every host you have" "-rw-------" \
+          "$(ls -l "$WORK/perm.feed.used" | awk '{ print substr($1, 1, 10) }')"
+# cycling round the whole cycle leaves one cache per ordering, and no more
+rm -f "$SORTSTATE" "$SORTSTATE".feed.*
+printf 'used\n' > "$SORTSTATE"
+for _ in 1 2 3; do
+  HOME="$H" SUSHI_SORT_STATE="$SORTSTATE" SUSHI_THEME=none "$SUSHI" __pickerfeed --next >/dev/null
+done
+assert_eq "one cache per ordering visited" "added count used" \
+          "$(ls "$SORTSTATE".feed.* | sed 's/.*\.feed\.//' | sort | tr '\n' ' ' | sed 's/ $//')"
+
+# ctrl-s repaints the list in one go where fzf can do that. Plain `reload` is
+# asynchronous: fzf blanks the list — header lines included, since they arrive
+# on the same pipe — until the child answers, and that flash is visible.
+fakefzf() {   # $1 = what `fzf --version` should say
+  mkdir -p "$WORK/fakebin"
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$1" > "$WORK/fakebin/fzf"
+  chmod +x "$WORK/fakebin/fzf"
+  PATH="$WORK/fakebin:$PATH" "$SUSHI" __fzfreload
+}
+assert_eq "fzf 0.36 gets reload-sync"      "reload-sync" "$(fakefzf '0.36.0 (brew)')"
+assert_eq "a current fzf gets reload-sync" "reload-sync" "$(fakefzf '0.74.3 (Homebrew)')"
+assert_eq "a distro build parses too"      "reload-sync" "$(fakefzf '0.38.0-1 (debian)')"
+assert_eq "fzf 0.35 keeps the async reload" "reload" "$(fakefzf '0.35.1')"
+assert_eq "fzf 0.24 keeps the async reload" "reload" "$(fakefzf '0.24.4-1')"
+assert_eq "an unreadable version keeps the async reload" "reload" "$(fakefzf 'unknown')"
+rm -rf "$WORK/fakebin"
+
 # no history: every host is unused, so A-Z
 rm -f "$H/.zsh_history"
 rm -rf "$XDG_CACHE_HOME"
