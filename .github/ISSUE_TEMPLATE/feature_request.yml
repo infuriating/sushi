@@ -1,0 +1,47 @@
+name: Feature request
+description: A behaviour or command that is not there yet.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        sushi is deliberately small. The best requests name the friction, not a wishlist item —
+        and explain why `~/.ssh/config` + existing commands are not enough.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The friction
+      description: What are you trying to do that is awkward or impossible today?
+      placeholder: |
+        I keep ProxyJump hosts that never show up in scan because…
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you want
+      description: Concrete behaviour. A CLI sketch or keybinding is better than "make it smarter".
+      placeholder: |
+        `sushi scan` should also read … and write Host stanzas like …
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Why not already covered (optional)
+      description: |
+        Did you try `sushi add`, ignore patterns, themes, `SUSHI_*` env, or editing the managed
+        block by hand? What fell short?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This stays within "ssh config is the deliverable" (no private database)
+          required: false
+        - label: I am willing to help implement / write a test
+          required: false

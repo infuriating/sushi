@@ -1,0 +1,85 @@
+name: Bug report
+description: Something broke, mis-parsed, or wrote the wrong thing.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. The more specific the history line / config snippet, the faster this gets fixed.
+        Strip hostnames and keys you care about — synthetic `example.com` is fine.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: One or two sentences. What you did, what you expected, what you got.
+      placeholder: |
+        `sushi scan` imported `deploy@10.0.0.1` as Host `10-0-0-1` with the wrong port…
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands. Prefer a tiny history fixture over "my real ~/.zsh_history".
+      placeholder: |
+        1. …
+        2. sushi scan -n
+        3. …
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Relevant history / config (optional)
+      description: |
+        A few lines of history, or the managed block from `~/.ssh/config`. Redact secrets.
+        For parse bugs, the exact line that misbehaved is gold.
+      render: text
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Actual output / error
+      description: Paste the command output, or `sushi __candidates` / `__lines` if useful.
+      render: text
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`sushi --version`, bash, zsh, fzf, ssh — whatever you have."
+      placeholder: sushi 0.x · bash 3.2.57 · zsh 5.9 · fzf 0.54 · OpenSSH_9.x
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Relevant env (optional)
+      description: Any `SUSHI_*` settings, non-default history path, Warp/iTerm quirks, etc.
+      render: bash
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for a duplicate
+          required: true
+        - label: I can reproduce this on a fresh clone / after `git pull`
+          required: false
