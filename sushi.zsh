@@ -171,6 +171,8 @@ if (( $+functions[compdef] )); then
         'share:alias for export'
         'import:merge a share file into ~/.ssh/config'
         'doctor:check binaries, ~/.ssh, integration, theme'
+        'update:check origin for a newer commit or release'
+        'upgrade:alias for update'
         'help:show usage'
         '--version:print the version'
       )
@@ -229,6 +231,10 @@ set:pick a theme in fzf and keep it'
         elif [[ ${words[3]} == set ]]; then
           _sushi_themes
         fi
+        ;;
+      update|upgrade)
+        _arguments -s : \
+          '--help[show usage]'
         ;;
     esac
   }

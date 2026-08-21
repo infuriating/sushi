@@ -16,7 +16,7 @@
 # Combine with commas: --mode=key,enter
 #
 # Nothing is copied anywhere: the sourced file stays in this checkout, so
-# `git pull` is all an update takes.
+# `git pull` is all an update takes. `sushi update` checks whether origin is ahead.
 
 set -euo pipefail
 

@@ -1570,6 +1570,8 @@ subs="$("$SUSHI" __subcommands)"
 assert_has "__subcommands lists export" "export" "$subs"
 assert_has "__subcommands lists share"  "share"  "$subs"
 assert_has "__subcommands lists import" "import" "$subs"
+assert_has "__subcommands lists update" "update" "$subs"
+assert_has "__subcommands lists upgrade" "upgrade" "$subs"
 
 # --------------------------------------------------------------------------
 section "sushi add"
@@ -1673,6 +1675,7 @@ assert_has "usage lists add"        "sushi add"     "$out"
 assert_has "usage lists --version"  "sushi --version" "$out"
 assert_has "usage still lists scan" "sushi scan"    "$out"
 assert_has "usage lists doctor"     "sushi doctor"  "$out"
+assert_has "usage lists update"     "sushi update"  "$out"
 assert_has "usage lists export"     "sushi export"  "$out"
 assert_has "usage lists import"     "sushi import"  "$out"
 assert_lacks "and stops at the code" "set -uo"      "$out"
@@ -1715,6 +1718,97 @@ printf 'Host box\n    NotARealSshOption yes\n' > "$DH/.ssh/config"
 out="$(drun 2>&1)"
 assert_has "an unparseable config is a failure"     "cannot parse"      "$out"
 assert_eq  "and doctor exits 1"                     "1"                 "$(drun >/dev/null 2>&1; echo $?)"
+
+# --------------------------------------------------------------------------
+section "sushi update"
+
+out="$("$SUSHI" update --help)"
+assert_has "update --help is one line" "sushi update" "$out"
+assert_lacks "and is not the picker empty-state" "no hosts in" "$out"
+assert_eq "upgrade is the same command" \
+  "$("$SUSHI" update --help)" "$("$SUSHI" upgrade --help)"
+
+NG="$WORK/update-nongit"
+mkdir -p "$NG/lib"
+cp "$SUSHI" "$NG/sushi"
+cp "$ROOT"/lib/*.sh "$NG/lib/"
+chmod +x "$NG/sushi"
+out="$("$NG/sushi" update 2>&1)" || true
+assert_has "a copy with no .git says so" "not a git checkout" "$out"
+assert_eq  "and exits 1" "1" "$("$NG/sushi" update >/dev/null 2>&1; echo $?)"
+
+if ! command -v git >/dev/null 2>&1; then
+  skip "update talks to a git remote" "git not installed"
+else
+  # Local origin + clone. The engine is planted in the clone so SELF's
+  # directory is the git root — the same layout as `git clone … ~/sushi`.
+  VER="$(awk -F'"' '/^VERSION=/{print $2; exit}' "$SUSHI")"
+  NEWER="$(printf '%s\n' "$VER" | awk -F. '{ print $1 "." $2 "." ($3 + 1) }')"
+
+  git_ident() {
+    git -C "$1" config user.email "sushi@test"
+    git -C "$1" config user.name "sushi"
+  }
+  plant_engine() {
+    mkdir -p "$1/lib"
+    cp "$SUSHI" "$1/sushi"
+    cp "$ROOT"/lib/*.sh "$1/lib/"
+    chmod +x "$1/sushi"
+  }
+
+  ORIGIN="$WORK/update-origin.git"
+  SRC="$WORK/update-src"
+  mkdir -p "$SRC"
+  git init --quiet "$SRC"
+  git_ident "$SRC"
+  printf 'x\n' > "$SRC/x"
+  git -C "$SRC" add x
+  git -C "$SRC" commit -q -m init
+  git -C "$SRC" branch -M main
+  git -C "$SRC" tag "$VER"
+  git init --quiet --bare "$ORIGIN"
+  git --git-dir="$ORIGIN" symbolic-ref HEAD refs/heads/main
+  git -C "$SRC" remote add origin "$ORIGIN"
+  git -C "$SRC" push -q -u origin main
+  git -C "$SRC" push -q origin "$VER"
+
+  CLONE="$WORK/update-clone"
+  git clone -q "$ORIGIN" "$CLONE"
+  plant_engine "$CLONE"
+  ENGINE="$CLONE/sushi"
+
+  out="$("$ENGINE" update 2>&1)"
+  rc=$?
+  assert_eq  "a clone at HEAD is up to date" "0" "$rc"
+  assert_has "and says so"                   "up to date" "$out"
+  assert_has "names the commit"              "commit"     "$out"
+  assert_has "names the release"             "$VER"       "$out"
+  assert_lacks "and does not suggest a pull" "git pull"   "$out"
+
+  # Newer tag on the same commit: a release, not a new commit.
+  git -C "$SRC" tag "$NEWER"
+  git -C "$SRC" push -q origin "$NEWER"
+  out="$("$ENGINE" update 2>&1)"
+  rc=$?
+  assert_eq  "a newer tag is an available update" "1" "$rc"
+  assert_has "and names the release"              "$NEWER"          "$out"
+  assert_has "and still has the old version"      "have $VER"       "$out"
+  assert_has "flags the release"                  "new   release"   "$out"
+  assert_lacks "commit is unchanged"              "new   commit"    "$out"
+  assert_has "tells you to pull"                  "git pull"        "$out"
+
+  # Then a new commit on origin, still not pulled.
+  printf 'y\n' >> "$SRC/x"
+  git -C "$SRC" commit -q -am next
+  git -C "$SRC" push -q origin main
+  out="$("$ENGINE" update 2>&1)"
+  rc=$?
+  assert_eq  "a new commit is an available update" "1" "$rc"
+  assert_has "and counts it"                       "1 commit on"   "$out"
+  assert_has "flags the commit"                    "new   commit"  "$out"
+  assert_has "release is still newer"              "$NEWER"        "$out"
+  assert_has "still tells you to pull"             "git pull"      "$out"
+fi
 
 # --------------------------------------------------------------------------
 section "added at / last used at"
