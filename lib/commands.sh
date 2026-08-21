@@ -1367,3 +1367,165 @@ cmd_version() {
     printf 'sushi %s\n' "$VERSION"
   fi
 }
+
+# sushi update — origin has a newer commit or release than this clone.
+# Does not pull. `git clone` is the install and `git pull` is the update;
+# this is the check that says whether a pull would do anything.
+
+# Prefer origin, else the first remote git lists.
+update_pick_remote() {
+  local dir="$1" origin="" first="" r
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    [ -z "$first" ] && first="$r"
+    [ "$r" = origin ] && origin=origin
+  done <<EOF
+$(git -C "$dir" remote 2>/dev/null)
+EOF
+  printf '%s\n' "${origin:-$first}"
+}
+
+# The remote-tracking ref for origin's default branch.
+update_remote_ref() {
+  local dir="$1" remote="$2" ref b
+  ref="$(git -C "$dir" symbolic-ref -q "refs/remotes/$remote/HEAD" 2>/dev/null)" || ref=""
+  if [ -n "$ref" ]; then
+    printf '%s\n' "$ref"
+    return 0
+  fi
+  for b in main master; do
+    if git -C "$dir" show-ref --verify --quiet "refs/remotes/$remote/$b"; then
+      printf 'refs/remotes/%s/%s\n' "$remote" "$b"
+      return 0
+    fi
+  done
+  ref="$(git -C "$dir" for-each-ref --count=1 --format='%(refname)' "refs/remotes/$remote/")"
+  [ -n "$ref" ] || return 1
+  printf '%s\n' "$ref"
+}
+
+# Highest X.Y.Z / vX.Y.Z tag on the remote. Empty if there are none.
+# Read from the remote so a local-only tag cannot look like a new release.
+update_newest_tag() {
+  git -C "$1" ls-remote --tags --refs "$2" | AWK '
+    function canon(s) { sub(/^v/, "", s); return s }
+    function newer(a, b,    n, m, i, A, B, max, ai, bi) {
+      n = split(canon(a), A, ".")
+      m = split(canon(b), B, ".")
+      max = (n > m ? n : m)
+      for (i = 1; i <= max; i++) {
+        ai = (i <= n && A[i] ~ /^[0-9]+$/) ? A[i] + 0 : 0
+        bi = (i <= m && B[i] ~ /^[0-9]+$/) ? B[i] + 0 : 0
+        if (ai != bi) return (ai > bi)
+      }
+      return 0
+    }
+    {
+      t = $2
+      sub(/^refs\/tags\//, "", t)
+      if (t ~ /^v?[0-9][0-9.]*$/) {
+        if (best == "" || newer(t, best)) best = t
+      }
+    }
+    END { if (best != "") print best }
+  '
+}
+
+# True if $1 is a lower X.Y.Z than $2. A leading v is ignored.
+update_ver_lt() {
+  AWK -v a="$1" -v b="$2" 'BEGIN {
+    sub(/^v/, "", a); sub(/^v/, "", b)
+    n = split(a, A, ".")
+    m = split(b, B, ".")
+    max = (n > m ? n : m)
+    for (i = 1; i <= max; i++) {
+      ai = (i <= n && A[i] ~ /^[0-9]+$/) ? A[i] + 0 : 0
+      bi = (i <= m && B[i] ~ /^[0-9]+$/) ? B[i] + 0 : 0
+      if (ai < bi) exit 0
+      if (ai > bi) exit 1
+    }
+    exit 1
+  }'
+}
+
+cmd_update() {
+  case "${1:-}" in
+    "" ) ;;
+    -h|--help)
+      printf '%s\n' "sushi update — check origin for a newer commit or release"
+      return 0 ;;
+    *) die "usage: sushi update" ;;
+  esac
+
+  local dir remote ref short behind ahead rsha newest fresh=0
+  local okc="" newc="" warnc="" off=""
+
+  dir="$(dirname "$SELF")"
+  if [ ! -d "$dir/.git" ] && [ ! -f "$dir/.git" ]; then
+    die "not a git checkout ($(tilde "$dir")) — git clone is how sushi is installed"
+  fi
+  have git || die "git not found"
+
+  remote="$(update_pick_remote "$dir")"
+  [ -n "$remote" ] || die "no git remote in $(tilde "$dir")"
+
+  # Don't hang on a credential prompt: this is a check, not a login.
+  if ! GIT_TERMINAL_PROMPT=0 git -C "$dir" fetch --quiet "$remote"; then
+    die "could not reach $remote"
+  fi
+
+  ref="$(update_remote_ref "$dir" "$remote")" \
+    || die "no branch on $remote to compare"
+  short="${ref#refs/remotes/}"
+  behind="$(git -C "$dir" rev-list --count "HEAD..$ref")" \
+    || die "could not compare to $short"
+  ahead="$(git -C "$dir" rev-list --count "$ref..HEAD")" \
+    || die "could not compare to $short"
+  rsha="$(git -C "$dir" rev-parse --short "$ref")"
+  newest="$(update_newest_tag "$dir" "$remote")"
+
+  if [ -t 1 ]; then
+    okc="$C_ACCENT"; newc="$C_PROMPT"; warnc="$C_PROMPT"; off="$C_OFF"
+  fi
+  tag() {
+    local c=""
+    case "$1" in
+      ok)   c="$okc" ;;
+      new)  c="$newc" ;;
+      warn) c="$warnc" ;;
+    esac
+    printf '  %s%-4s%s  %-12s %s\n' "$c" "$1" "$off" "$2" "$3"
+  }
+
+  cmd_version
+  printf '\n'
+
+  if [ "$behind" -gt 0 ] && [ "$ahead" -gt 0 ]; then
+    tag warn commit "diverged from $short  ($behind behind, $ahead local)"
+    fresh=1
+  elif [ "$behind" -gt 0 ]; then
+    if [ "$behind" -eq 1 ]; then
+      tag new commit "1 commit on $short  $rsha"
+    else
+      tag new commit "$behind commits on $short  $rsha"
+    fi
+    fresh=1
+  else
+    tag ok commit "$short  $rsha"
+  fi
+
+  if [ -n "$newest" ] && update_ver_lt "$VERSION" "$newest"; then
+    tag new release "$newest  (have $VERSION)"
+    fresh=1
+  else
+    tag ok release "$VERSION"
+  fi
+
+  printf '\n'
+  if [ "$fresh" = 1 ]; then
+    printf 'git pull in %s\n' "$(tilde "$dir")"
+    return 1
+  fi
+  printf 'up to date\n'
+  return 0
+}

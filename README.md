@@ -109,8 +109,9 @@ alias you have so the ages stay in line:
 Other commands: `sushi list` prints the host table, `sushi edit` opens the config,
 `sushi theme` shows the palette in force (`theme list` and `theme set` for the rest), `sushi choose`
 prints an alias instead of connecting (useful for your own scripts), `sushi doctor` checks the
-binaries, `~/.ssh`, the integration and the theme, and `sushi --version` says which build you are
-on (plus the commit, since `git pull` is the update).
+binaries, `~/.ssh`, the integration and the theme, `sushi update` asks origin whether a newer
+commit or release is out (then `git pull` to take it), and `sushi --version` says which build you
+are on (plus the commit, since `git pull` is the update).
 
 `sushi <TAB>` completes subcommands and your imported aliases. `ssh <TAB>` is deliberately left
 alone: sushi writes real `Host` stanzas, so zsh's own `_ssh` already knows every alias — that is

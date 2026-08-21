@@ -200,6 +200,7 @@ sushi __aliases          # alias names only, for completion
 sushi __fzfhint          # the platform's fzf install command (install.sh reuses it)
 sushi __themes           # theme names, for completion and the theme picker
 sushi __themepreview     # the theme picker's preview pane for $SUSHI_THEME
+sushi update             # origin ahead of this clone? commits and release tags
 ```
 
 `sushi theme` is not hidden, but it belongs in the same list: it prints the resolved palette, the
